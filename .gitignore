@@ -1,0 +1,14 @@
+__pycache__/
+build/
+tmp*/
+*.pyc
+*.pyo
+*.log
+
+# Release binaries are uploaded to GitHub Releases.
+dist/*.exe
+
+# Local environment files.
+.env
+.venv/
+venv/
