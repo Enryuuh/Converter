@@ -17,11 +17,14 @@ from app import (
     format_conversion_summary,
     format_output_estimate_summary,
     flatten_alpha,
+    image_to_svg_bytes,
     is_raw_image,
     is_supported_image,
     parse_output_formats,
     parse_version,
+    remove_background_from_image,
     resize_image,
+    write_conversion_reports,
     ImageConverterApp,
 )
 
@@ -47,6 +50,8 @@ def make_options(**overrides):
         "max_workers": 1,
         "strip_metadata": True,
         "open_output_when_done": False,
+        "remove_background": False,
+        "remove_background_tolerance": 32,
     }
     values.update(overrides)
     return ConversionOptions(**values)
@@ -199,6 +204,43 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(flattened.mode, "RGB")
         self.assertEqual(flattened.getpixel((0, 0)), (10, 20, 30))
 
+    def test_remove_background_makes_edge_background_transparent(self):
+        image = Image.new("RGB", (24, 24), "white")
+        for x in range(8, 16):
+            for y in range(8, 16):
+                image.putpixel((x, y), (200, 20, 20))
+
+        removed = remove_background_from_image(image, tolerance=24)
+
+        self.assertEqual(removed.mode, "RGBA")
+        self.assertLess(removed.getpixel((0, 0))[3], 10)
+        self.assertGreater(removed.getpixel((12, 12))[3], 240)
+
+    def test_image_to_svg_bytes_creates_svg_paths(self):
+        image = Image.new("RGBA", (8, 8), (0, 0, 0, 0))
+        for x in range(2, 6):
+            for y in range(2, 6):
+                image.putpixel((x, y), (10, 120, 220, 255))
+
+        payload = image_to_svg_bytes(image)
+
+        self.assertIn(b"<svg", payload)
+        self.assertIn(b"<path", payload)
+        self.assertIn(b"#0a78dc", payload)
+
+    def test_convert_image_optimized_creates_svg_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            source = output_dir / "source.png"
+            destination = output_dir / "source.svg"
+            Image.new("RGB", (24, 24), "navy").save(source)
+            options = make_options(output_format="SVG", output_formats=("SVG",), output_dir=output_dir)
+
+            convert_image_optimized(source, destination, options)
+
+            self.assertTrue(destination.exists())
+            self.assertIn("<svg", destination.read_text(encoding="utf-8"))
+
     def test_convert_image_optimized_creates_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -253,6 +295,19 @@ class ConversionTests(unittest.TestCase):
             with Image.open(destination) as image:
                 durations = [frame.info.get("duration") for frame in ImageSequence.Iterator(image)]
             self.assertEqual(durations, [40, 220])
+
+    def test_write_conversion_reports_creates_txt_and_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            output = output_dir / "out.webp"
+            output.write_bytes(b"123")
+
+            txt_path, csv_path = write_conversion_reports(output_dir, [output], ["bad file"], 1, False, 1000, 3)
+
+            self.assertTrue(txt_path.exists())
+            self.assertTrue(csv_path.exists())
+            self.assertIn("out.webp", txt_path.read_text(encoding="utf-8"))
+            self.assertIn("bad file", csv_path.read_text(encoding="utf-8"))
 
     def test_disabled_size_and_target_controls_are_ignored(self):
         app = ImageConverterApp()

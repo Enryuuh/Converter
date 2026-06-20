@@ -1,7 +1,7 @@
 # Converter
 
 Aplicacion de escritorio para convertir imagenes por lote entre formatos comunes:
-PNG, JPG, JPEG, WEBP, AVIF, BMP, TIFF, GIF, ICO y PDF.
+PNG, JPG, JPEG, WEBP, AVIF, BMP, TIFF, GIF, ICO, PDF y SVG.
 Tambien importa RAW de camara comunes como DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2 y SRW para convertirlos a formatos normales.
 
 Descarga la version para Windows desde [GitHub Releases](https://github.com/Enryuuh/Converter/releases/latest).
@@ -13,12 +13,18 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 ## Funciones
 
 - Vista previa de la imagen seleccionada.
+- Miniaturas en la cola para identificar fotos rapido.
 - Peso estimado automatico de la imagen seleccionada antes de convertir.
 - Comparacion antes/despues con peso estimado de salida.
-- Estimacion de peso para todo el lote antes de convertir.
+- Estimacion de peso y ahorro total para todo el lote antes de convertir.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
+- Filtros por estado, formato y peso original.
+- Reportes TXT y CSV al terminar cada conversion.
+- Presets para web, Instagram, WhatsApp, impresion, SVG, fondo transparente, ICO y PDF.
 - Autodeteccion por contenido para imagenes sin extension o con extension no estandar.
 - Importacion de RAW de camara mediante `rawpy`/LibRaw.
+- Quitar fondo para fondos limpios conectados a los bordes.
+- Salida SVG vectorial simplificada para logos e ilustraciones.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
 - Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
 - Reordenar la cola con botones para subir y bajar imagenes.
@@ -95,8 +101,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.4
-git push origin v1.3.4
+git tag v1.3.5
+git push origin v1.3.5
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
@@ -113,4 +119,6 @@ python app.py
 - Al convertir a JPG, BMP o PDF, la transparencia se reemplaza con fondo blanco.
 - Para GIF, WEBP, TIFF y PDF se intenta conservar multiples frames cuando la imagen origen los tiene.
 - RAW funciona como entrada, no como formato de salida. Converter revela el RAW a RGB y lo exporta a JPG, PNG, WEBP, AVIF, TIFF, PDF u otros formatos soportados.
+- SVG es vectorizacion simplificada por formas de color; funciona mejor con logos, iconos e ilustraciones que con fotografia compleja.
+- Quitar fondo funciona mejor con fondos de estudio, blancos o planos. Para fondos muy complejos se necesitaria segmentacion por IA.
 - La compatibilidad exacta depende de Pillow y de los codecs disponibles en Windows.
