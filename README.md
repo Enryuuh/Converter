@@ -18,26 +18,35 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Peso estimado por archivo directamente en la cola.
 - Comparacion antes/despues con peso estimado de salida.
 - Comparacion con fondo cuadriculado para transparencias y zoom rapido.
+- Peso real mostrado en la cola al terminar cada archivo.
 - Estimacion de peso y ahorro total para todo el lote antes de convertir.
+- Pausar/reanudar conversiones, cancelar y reintentar solo archivos con error.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
 - Filtros por estado, formato y peso original.
 - Deteccion de duplicados por contenido al agregar archivos o carpetas.
+- Avisos visuales en detalle para RAW, transparencia, animados, archivos pesados o problemas.
 - Reportes TXT y CSV al terminar cada conversion.
-- Presets para web, Instagram, WhatsApp, impresion, producto, SVG, fondo transparente, ICO y PDF.
+- Presets para web, Instagram, WhatsApp, impresion, producto, SVG, fondo transparente, ahorro maximo, sin perdida, ICO y PDF.
 - Autodeteccion por contenido para imagenes sin extension o con extension no estandar.
 - Importacion de RAW de camara mediante `rawpy`/LibRaw.
 - Quitar fondo para fondos limpios conectados a los bordes.
 - Quitar fondo mejorado con deteccion desde mas puntos del borde, sin modelos pesados de IA.
+- Suavizado configurable del borde al quitar fondo.
 - Salida SVG vectorial simplificada y mas compacta para logos e ilustraciones.
+- Edicion basica por lote: rotar, voltear, recortar bordes y crear lienzo cuadrado.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
 - Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
 - Reordenar la cola con botones para subir y bajar imagenes.
 - Barra de progreso y estado por archivo.
 - Conversion paralela configurable.
 - Conversion a varios formatos en una sola corrida usando `Formatos extra`.
+- Regla para archivos pesados: si superan cierto KB, usar una calidad mas agresiva.
 - Cancelacion de conversion en curso.
+- Repetir la ultima conversion.
 - Historial de conversiones y errores con exportacion a TXT.
 - Redimensionado con o sin proporcion.
+- Mantener estructura de carpetas al convertir directorios completos.
+- Guardar en subcarpeta automatica `Converter_Output`.
 - Compresion por peso objetivo en KB para formatos con calidad configurable.
 - Aviso cuando el peso objetivo no se puede alcanzar sin cambiar dimensiones/formato.
 - Fondo configurable para formatos sin transparencia como JPG, BMP y PDF.
@@ -46,6 +55,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Ajustes rapidos: web, maxima calidad, reducir peso, icono ICO y PDF desde imagenes.
 - Perfiles personalizados guardados en el equipo.
 - Importacion y exportacion de perfiles en JSON.
+- Importacion y exportacion de ajustes completos en JSON.
 - Ajustes guardados automaticamente en `%APPDATA%\Converter\settings.json`.
 - Logs persistentes en `%APPDATA%\Converter\converter.log`.
 - Renombrado por lote: conservar, numerar o prefijo/sufijo.
@@ -55,6 +65,9 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Modo nocturno/claro con cambio desde la cabecera.
 - Tooltips y guia integrada para explicar cada opcion de salida.
 - Menu contextual opcional de Windows para abrir archivos o carpetas desde clic derecho.
+- Menu contextual opcional tambien desde el instalador.
+- Modo CLI: convierte desde terminal con `Converter.exe archivo.png --to webp`.
+- Modo portable creando `portable.flag` junto al ejecutable.
 - Campos contextuales: las opciones que no aplican se desactivan automaticamente.
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
@@ -107,8 +120,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.6
-git push origin v1.3.6
+git tag v1.3.7
+git push origin v1.3.7
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
@@ -120,6 +133,12 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
+Modo CLI:
+
+```powershell
+python app.py foto.png --to webp --output .\salida --quality 80
+```
+
 ## Notas
 
 - Al convertir a JPG, BMP o PDF, la transparencia se reemplaza con fondo blanco.
@@ -128,4 +147,5 @@ python app.py
 - SVG es vectorizacion simplificada por formas de color; funciona mejor con logos, iconos e ilustraciones que con fotografia compleja.
 - Quitar fondo funciona mejor con fondos de estudio, blancos o planos. Para fondos muy complejos se necesitaria segmentacion por IA.
 - El menu contextual se instala desde la app en el usuario actual, sin permisos de administrador.
+- Para modo portable, crea un archivo vacio llamado `portable.flag` junto al ejecutable; los ajustes se guardaran en `data`.
 - La compatibilidad exacta depende de Pillow y de los codecs disponibles en Windows.

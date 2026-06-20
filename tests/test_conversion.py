@@ -25,9 +25,12 @@ from app import (
     parse_output_formats,
     parse_version,
     remove_background_from_image,
+    render_output_stem,
+    run_cli,
     resize_image,
     write_conversion_reports,
     ImageConverterApp,
+    apply_square_canvas,
 )
 
 
@@ -45,6 +48,7 @@ def make_options(**overrides):
         "naming_mode": "Conservar",
         "prefix": "",
         "suffix": "",
+        "naming_template": "{name}_{format}",
         "overwrite": False,
         "combine_pdf": False,
         "target_size_enabled": False,
@@ -52,8 +56,26 @@ def make_options(**overrides):
         "max_workers": 1,
         "strip_metadata": True,
         "open_output_when_done": False,
+        "lossless": False,
+        "keep_folder_structure": False,
+        "use_output_subfolder": False,
         "remove_background": False,
         "remove_background_tolerance": 32,
+        "remove_background_feather": 1,
+        "rotate_degrees": 0,
+        "flip_horizontal": False,
+        "flip_vertical": False,
+        "crop_enabled": False,
+        "crop_left": 0,
+        "crop_top": 0,
+        "crop_right": 0,
+        "crop_bottom": 0,
+        "square_canvas": False,
+        "canvas_size": None,
+        "canvas_transparent": True,
+        "large_file_rule_enabled": False,
+        "large_file_threshold_kb": None,
+        "large_file_quality": 72,
     }
     values.update(overrides)
     return ConversionOptions(**values)
@@ -89,6 +111,28 @@ class ConversionTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             self.assertEqual(first.name, "photo.webp")
             self.assertEqual(second.name, "photo_1.webp")
+
+    def test_build_output_path_keeps_folder_structure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "input"
+            source_dir = root / "nested"
+            source_dir.mkdir(parents=True)
+            source = source_dir / "photo.png"
+            source.touch()
+            output_dir = Path(tmp) / "out"
+            options = make_options(output_dir=output_dir, keep_folder_structure=True)
+
+            output = build_output_path(source, output_dir, options, 1, source_root=root)
+
+            self.assertEqual(output, output_dir / "nested" / "photo.webp")
+
+    def test_render_output_stem_uses_template_tokens(self):
+        source = Path("folder/photo.png")
+        options = make_options(output_format="JPG", naming_mode="Plantilla", naming_template="{folder}_{name}_{index}_{format}")
+
+        stem = render_output_stem(source, options, 7)
+
+        self.assertEqual(stem, "folder_photo_007_jpg")
 
     def test_parse_version_compares_semantic_versions(self):
         self.assertGreater(parse_version("v1.10.0"), parse_version("1.2.9"))
@@ -223,6 +267,15 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(flattened.mode, "RGB")
         self.assertEqual(flattened.getpixel((0, 0)), (10, 20, 30))
 
+    def test_square_canvas_centers_image(self):
+        image = Image.new("RGBA", (20, 10), (255, 0, 0, 255))
+        options = make_options(square_canvas=True, canvas_size=32, canvas_transparent=True)
+
+        squared = apply_square_canvas(image, options)
+
+        self.assertEqual(squared.size, (32, 32))
+        self.assertEqual(squared.getpixel((0, 0))[3], 0)
+
     def test_remove_background_makes_edge_background_transparent(self):
         image = Image.new("RGB", (24, 24), "white")
         for x in range(8, 16):
@@ -327,6 +380,18 @@ class ConversionTests(unittest.TestCase):
             self.assertTrue(csv_path.exists())
             self.assertIn("out.webp", txt_path.read_text(encoding="utf-8"))
             self.assertIn("bad file", csv_path.read_text(encoding="utf-8"))
+
+    def test_run_cli_converts_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            source = folder / "source.png"
+            output_dir = folder / "out"
+            Image.new("RGB", (20, 12), "orange").save(source)
+
+            exit_code = run_cli([str(source), "--to", "webp", "--output", str(output_dir), "--quality", "80"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((output_dir / "source.webp").exists())
 
     def test_disabled_size_and_target_controls_are_ignored(self):
         app = ImageConverterApp()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
 import csv
 import hashlib
@@ -9,6 +10,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -50,14 +52,16 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
-BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+BASE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
 LOGO_PNG = BASE_DIR / "assets" / "converter-logo.png"
 LOGO_ICO = BASE_DIR / "assets" / "converter-logo.ico"
-CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Converter"
+PORTABLE_FLAG = APP_DIR / "portable.flag"
+CONFIG_DIR = APP_DIR / "data" if PORTABLE_FLAG.exists() else Path(os.getenv("APPDATA", str(Path.home()))) / "Converter"
 PROFILES_PATH = CONFIG_DIR / "profiles.json"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
 LOG_PATH = CONFIG_DIR / "converter.log"
@@ -163,6 +167,7 @@ class ConversionOptions:
     naming_mode: str
     prefix: str
     suffix: str
+    naming_template: str
     overwrite: bool
     combine_pdf: bool
     target_size_enabled: bool
@@ -170,8 +175,26 @@ class ConversionOptions:
     max_workers: int
     strip_metadata: bool
     open_output_when_done: bool
+    lossless: bool
+    keep_folder_structure: bool
+    use_output_subfolder: bool
     remove_background: bool
     remove_background_tolerance: int
+    remove_background_feather: int
+    rotate_degrees: int
+    flip_horizontal: bool
+    flip_vertical: bool
+    crop_enabled: bool
+    crop_left: int
+    crop_top: int
+    crop_right: int
+    crop_bottom: int
+    square_canvas: bool
+    canvas_size: int | None
+    canvas_transparent: bool
+    large_file_rule_enabled: bool
+    large_file_threshold_kb: int | None
+    large_file_quality: int
 
 
 def is_supported_image(path: Path) -> bool:
@@ -261,6 +284,17 @@ def file_signature(path: Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return f"{size}:{digest.hexdigest()}"
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(round(seconds)))
+    minutes, remaining_seconds = divmod(seconds, 60)
+    hours, remaining_minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {remaining_minutes}m"
+    if remaining_minutes:
+        return f"{remaining_minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"
 
 
 def append_log(message: str) -> None:
@@ -382,26 +416,69 @@ def safe_name_part(text: str) -> str:
     return cleaned
 
 
-def build_output_path(source: Path, output_dir: Path, options: ConversionOptions, index: int, reserved: set[Path] | None = None) -> Path:
-    suffix = OUTPUT_FORMATS[options.output_format]["ext"]
-    stem = source.stem
-    if options.naming_mode == "Numerado":
-        stem = f"{index:03d}_{stem}"
-    elif options.naming_mode == "Prefijo/sufijo":
-        stem = f"{safe_name_part(options.prefix)}{stem}{safe_name_part(options.suffix)}"
+class SafeFormatMap(dict):
+    def __missing__(self, key: str) -> str:
+        return ""
 
-    candidate = output_dir / f"{stem}{suffix}"
+
+def render_output_stem(source: Path, options: ConversionOptions, index: int) -> str:
+    if options.naming_mode == "Numerado":
+        return f"{index:03d}_{source.stem}"
+    if options.naming_mode == "Prefijo/sufijo":
+        return f"{safe_name_part(options.prefix)}{source.stem}{safe_name_part(options.suffix)}"
+    if options.naming_mode == "Plantilla":
+        size_text = format_size(source.stat().st_size if source.exists() else 0).replace(" ", "")
+        tokens = SafeFormatMap(
+            name=source.stem,
+            index=f"{index:03d}",
+            format=options.output_format.lower(),
+            date=datetime.now().strftime("%Y%m%d"),
+            time=datetime.now().strftime("%H%M%S"),
+            size=size_text,
+            folder=source.parent.name,
+        )
+        try:
+            stem = options.naming_template.format_map(tokens).strip()
+        except (KeyError, ValueError):
+            stem = f"{source.stem}_{index:03d}"
+        return safe_name_part(stem or source.stem)
+    return source.stem
+
+
+def output_directory_for_source(source: Path, output_dir: Path, options: ConversionOptions, source_root: Path | None = None) -> Path:
+    if not options.keep_folder_structure or source_root is None:
+        return output_dir
+    try:
+        relative_parent = source.parent.resolve().relative_to(source_root.resolve())
+    except (OSError, ValueError):
+        return output_dir
+    return output_dir / relative_parent
+
+
+def build_output_path(
+    source: Path,
+    output_dir: Path,
+    options: ConversionOptions,
+    index: int,
+    reserved: set[Path] | None = None,
+    source_root: Path | None = None,
+) -> Path:
+    suffix = OUTPUT_FORMATS[options.output_format]["ext"]
+    target_dir = output_directory_for_source(source, output_dir, options, source_root)
+    stem = render_output_stem(source, options, index)
+
+    candidate = target_dir / f"{stem}{suffix}"
     counter = 1
     if options.overwrite:
         if reserved is not None:
             while candidate in reserved:
-                candidate = output_dir / f"{stem}_{counter}{suffix}"
+                candidate = target_dir / f"{stem}_{counter}{suffix}"
                 counter += 1
             reserved.add(candidate)
         return candidate
 
     while candidate.exists() or (reserved is not None and candidate in reserved):
-        candidate = output_dir / f"{stem}_{counter}{suffix}"
+        candidate = target_dir / f"{stem}_{counter}{suffix}"
         counter += 1
     if reserved is not None:
         reserved.add(candidate)
@@ -434,6 +511,42 @@ def resize_image(image: Image.Image, options: ConversionOptions) -> Image.Image:
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 
+def apply_basic_edits(image: Image.Image, options: ConversionOptions) -> Image.Image:
+    edited = image.copy()
+    if options.crop_enabled:
+        left = max(0, min(options.crop_left, edited.width - 1))
+        top = max(0, min(options.crop_top, edited.height - 1))
+        right_margin = max(0, min(options.crop_right, edited.width - left - 1))
+        bottom_margin = max(0, min(options.crop_bottom, edited.height - top - 1))
+        right = edited.width - right_margin
+        bottom = edited.height - bottom_margin
+        if right > left and bottom > top:
+            edited = edited.crop((left, top, right, bottom))
+    if options.rotate_degrees:
+        edited = edited.rotate(-options.rotate_degrees, expand=True)
+    if options.flip_horizontal:
+        edited = ImageOps.mirror(edited)
+    if options.flip_vertical:
+        edited = ImageOps.flip(edited)
+    return edited
+
+
+def apply_square_canvas(image: Image.Image, options: ConversionOptions) -> Image.Image:
+    if not options.square_canvas:
+        return image
+    supports_alpha = OUTPUT_FORMATS[options.output_format]["supports_alpha"]
+    use_alpha = options.canvas_transparent and supports_alpha
+    side = options.canvas_size or max(image.size)
+    side = max(1, side)
+    content = image.convert("RGBA")
+    if content.width > side or content.height > side:
+        content.thumbnail((side, side), Image.Resampling.LANCZOS)
+    background = (*options.background, 0 if use_alpha else 255)
+    canvas = Image.new("RGBA", (side, side), background)
+    canvas.alpha_composite(content, ((side - content.width) // 2, (side - content.height) // 2))
+    return canvas if use_alpha else canvas.convert("RGB")
+
+
 def flatten_alpha(image: Image.Image, background: tuple[int, int, int]) -> Image.Image:
     if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
         rgba = image.convert("RGBA")
@@ -446,7 +559,7 @@ def flatten_alpha(image: Image.Image, background: tuple[int, int, int]) -> Image
     return image
 
 
-def remove_background_from_image(image: Image.Image, tolerance: int = 32) -> Image.Image:
+def remove_background_from_image(image: Image.Image, tolerance: int = 32, feather: int = 1) -> Image.Image:
     rgba = image.convert("RGBA")
     if rgba.width <= 1 or rgba.height <= 1:
         return rgba
@@ -481,7 +594,9 @@ def remove_background_from_image(image: Image.Image, tolerance: int = 32) -> Ima
     marker_mask = Image.new("L", work.size, 0)
     marker_pixels = np.all(np.asarray(work, dtype=np.uint8) == np.array(marker, dtype=np.uint8), axis=2)
     marker_mask = Image.fromarray((marker_pixels.astype(np.uint8) * 255), "L")
-    marker_mask = marker_mask.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(0.7))
+    marker_mask = marker_mask.filter(ImageFilter.MaxFilter(3))
+    if feather > 0:
+        marker_mask = marker_mask.filter(ImageFilter.GaussianBlur(max(0.2, min(4.0, feather / 2))))
 
     alpha = rgba.getchannel("A")
     foreground_alpha = Image.eval(marker_mask, lambda value: 255 - value)
@@ -499,10 +614,12 @@ def multiply_alpha(left: Image.Image, right: Image.Image) -> Image.Image:
 def prepare_frame(image: Image.Image, options: ConversionOptions) -> Image.Image:
     output_format = options.output_format
     supports_alpha = OUTPUT_FORMATS[output_format]["supports_alpha"]
-    resized = resize_image(image, options)
+    edited = apply_basic_edits(image, options)
+    resized = resize_image(edited, options)
 
     if options.remove_background:
-        resized = remove_background_from_image(resized, options.remove_background_tolerance)
+        resized = remove_background_from_image(resized, options.remove_background_tolerance, options.remove_background_feather)
+    resized = apply_square_canvas(resized, options)
 
     if output_format == "SVG":
         return resized.convert("RGBA")
@@ -517,7 +634,11 @@ def prepare_frame(image: Image.Image, options: ConversionOptions) -> Image.Image
 
 def build_save_kwargs(options: ConversionOptions, quality_override: int | None = None) -> dict:
     save_kwargs = {}
-    if OUTPUT_FORMATS[options.output_format]["quality"]:
+    if options.lossless and options.output_format == "WEBP":
+        save_kwargs["lossless"] = True
+        save_kwargs["quality"] = 100
+        save_kwargs["method"] = 6
+    elif OUTPUT_FORMATS[options.output_format]["quality"]:
         save_kwargs["quality"] = quality_override if quality_override is not None else options.quality
         save_kwargs["optimize"] = True
     if options.output_format == "PNG":
@@ -791,6 +912,112 @@ def write_conversion_reports(
     return txt_path, csv_path
 
 
+def iter_input_images(paths: list[Path]) -> list[tuple[Path, Path]]:
+    entries: list[tuple[Path, Path]] = []
+    for path in paths:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir():
+            for child in resolved.rglob("*"):
+                if child.is_file() and is_supported_image(child):
+                    entries.append((child.resolve(), resolved))
+        elif resolved.is_file() and is_supported_image(resolved):
+            entries.append((resolved, resolved.parent))
+    return entries
+
+
+def parse_resize_arg(value: str) -> tuple[int | None, int | None]:
+    value = value.lower().strip()
+    if not value:
+        return None, None
+    if "x" in value:
+        left, right = value.split("x", 1)
+        return (int(left) if left else None, int(right) if right else None)
+    return int(value), None
+
+
+def run_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog=APP_NAME, description="Convertir imagenes por lote sin abrir la interfaz.")
+    parser.add_argument("paths", nargs="+", help="Archivos o carpetas de imagenes.")
+    parser.add_argument("--to", default="WEBP", help="Formato principal de salida, por ejemplo WEBP, PNG o JPG.")
+    parser.add_argument("--extra", default="", help="Formatos extra separados por coma.")
+    parser.add_argument("--output", default=str(Path.cwd() / "Converter_Output"), help="Carpeta de salida.")
+    parser.add_argument("--quality", type=int, default=85, help="Calidad 1-100 para formatos con compresion.")
+    parser.add_argument("--resize", default="", help="Tamano: 1200, 1200x800, 1200x o x800.")
+    parser.add_argument("--background", default="#ffffff", help="Color de fondo para formatos sin transparencia.")
+    parser.add_argument("--lossless", action="store_true", help="WEBP sin perdida.")
+    parser.add_argument("--overwrite", action="store_true", help="Sobrescribir si existe.")
+    parser.add_argument("--keep-structure", action="store_true", help="Mantener estructura de carpetas.")
+    parser.add_argument("--subfolder", action="store_true", help="Crear subcarpeta Converter_Output dentro de --output.")
+    parser.add_argument("--remove-background", action="store_true", help="Quitar fondo ligero desde bordes.")
+    parser.add_argument("--strip-metadata", action="store_true", default=True, help="Quitar metadatos EXIF.")
+    args = parser.parse_args(argv)
+
+    output_format = args.to.upper().lstrip(".")
+    output_formats = parse_output_formats(output_format, args.extra)
+    width, height = parse_resize_arg(args.resize)
+    output_dir = Path(args.output).expanduser()
+    if args.subfolder:
+        output_dir = output_dir / "Converter_Output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    entries = iter_input_images([Path(path) for path in args.paths])
+    if not entries:
+        return 2
+
+    options = ConversionOptions(
+        output_format=output_format,
+        output_formats=output_formats,
+        quality=max(1, min(100, args.quality)),
+        output_dir=output_dir,
+        resize_enabled=bool(width or height),
+        width=width,
+        height=height,
+        keep_aspect=True,
+        background=ImageColor.getrgb(args.background),
+        naming_mode="Conservar",
+        prefix="",
+        suffix="",
+        naming_template="{name}_{format}",
+        overwrite=args.overwrite,
+        combine_pdf=False,
+        target_size_enabled=False,
+        target_size_kb=None,
+        max_workers=max(1, min(4, os.cpu_count() or 1)),
+        strip_metadata=args.strip_metadata,
+        open_output_when_done=False,
+        lossless=args.lossless,
+        keep_folder_structure=args.keep_structure,
+        use_output_subfolder=args.subfolder,
+        remove_background=args.remove_background,
+        remove_background_tolerance=32,
+        remove_background_feather=1,
+        rotate_degrees=0,
+        flip_horizontal=False,
+        flip_vertical=False,
+        crop_enabled=False,
+        crop_left=0,
+        crop_top=0,
+        crop_right=0,
+        crop_bottom=0,
+        square_canvas=False,
+        canvas_size=None,
+        canvas_transparent=True,
+        large_file_rule_enabled=False,
+        large_file_threshold_kb=None,
+        large_file_quality=72,
+    )
+    reserved: set[Path] = set()
+    for index, (source, root) in enumerate(entries, start=1):
+        for output_format in output_formats:
+            format_options = replace(options, output_format=output_format, output_formats=(output_format,))
+            destination = build_output_path(source, output_dir, format_options, index, reserved, root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            convert_image_optimized(source, destination, format_options)
+    return 0
+
+
 class ImageConverterApp(TkBase):
     def __init__(self) -> None:
         super().__init__()
@@ -806,6 +1033,7 @@ class ImageConverterApp(TkBase):
         self.file_signatures: dict[Path, str] = {}
         self.file_estimates: dict[Path, str] = {}
         self.file_estimate_cache: dict[tuple, str] = {}
+        self.file_roots: dict[Path, Path] = {}
         self.thumbnail_images: dict[Path, ImageTk.PhotoImage] = {}
         self.logo_image: ImageTk.PhotoImage | None = None
         self.preview_image: ImageTk.PhotoImage | None = None
@@ -817,8 +1045,11 @@ class ImageConverterApp(TkBase):
         self.file_estimate_request_id = 0
         self.file_estimate_after_id: str | None = None
         self.cancel_event = threading.Event()
+        self.pause_event = threading.Event()
         self.profiles: dict[str, dict] = self._load_profiles()
         self.history_entries: list[str] = []
+        self.last_failed_files: list[Path] = []
+        self.last_conversion_files: list[Path] = []
         self.conversion_running = False
 
         self.output_dir = tk.StringVar(value=str(Path.home() / "Pictures"))
@@ -841,6 +1072,7 @@ class ImageConverterApp(TkBase):
         self.naming_mode = tk.StringVar(value="Conservar")
         self.prefix = tk.StringVar(value="")
         self.suffix = tk.StringVar(value="")
+        self.naming_template = tk.StringVar(value="{name}_{format}")
         self.overwrite = tk.BooleanVar(value=False)
         self.combine_pdf = tk.BooleanVar(value=False)
         self.target_size_enabled = tk.BooleanVar(value=False)
@@ -848,12 +1080,32 @@ class ImageConverterApp(TkBase):
         self.max_workers = tk.IntVar(value=min(4, max(1, os.cpu_count() or 1)))
         self.strip_metadata = tk.BooleanVar(value=True)
         self.open_output_when_done = tk.BooleanVar(value=True)
+        self.lossless = tk.BooleanVar(value=False)
+        self.keep_folder_structure = tk.BooleanVar(value=False)
+        self.use_output_subfolder = tk.BooleanVar(value=False)
         self.remove_background = tk.BooleanVar(value=False)
         self.remove_background_tolerance = tk.IntVar(value=32)
+        self.remove_background_feather = tk.IntVar(value=1)
+        self.rotate_degrees = tk.IntVar(value=0)
+        self.flip_horizontal = tk.BooleanVar(value=False)
+        self.flip_vertical = tk.BooleanVar(value=False)
+        self.crop_enabled = tk.BooleanVar(value=False)
+        self.crop_left = tk.StringVar(value="0")
+        self.crop_top = tk.StringVar(value="0")
+        self.crop_right = tk.StringVar(value="0")
+        self.crop_bottom = tk.StringVar(value="0")
+        self.square_canvas = tk.BooleanVar(value=False)
+        self.canvas_size = tk.StringVar(value="")
+        self.canvas_transparent = tk.BooleanVar(value=True)
+        self.large_file_rule_enabled = tk.BooleanVar(value=False)
+        self.large_file_threshold_kb = tk.StringVar(value="2048")
+        self.large_file_quality = tk.IntVar(value=72)
         self.profile_name = tk.StringVar(value="")
         self.dark_mode = tk.BooleanVar(value=False)
         self.preview_zoom = tk.DoubleVar(value=1.0)
         self.progress = tk.DoubleVar(value=0)
+        self.throughput_info = tk.StringVar(value="Sin conversion activa.")
+        self.output_name_preview = tk.StringVar(value="Salida: selecciona una imagen.")
 
         self._apply_settings(self._load_settings())
         self._build_ui()
@@ -1223,23 +1475,68 @@ class ImageConverterApp(TkBase):
         tk.Label(options_head, text="Salida y optimizacion", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self._button(options_head, "Guia", self.show_options_guide, "ghost").grid(row=0, column=1, sticky="e", padx=(0, 8))
-        self._button(options_head, "Importar perfil", self.import_profiles, "ghost").grid(row=0, column=2, sticky="e", padx=(0, 8))
-        self._button(options_head, "Exportar perfil", self.export_profiles, "ghost").grid(row=0, column=3, sticky="e", padx=(0, 8))
-        self._button(options_head, "Menu Windows", self.configure_context_menu, "ghost").grid(row=0, column=4, sticky="e")
+        self._button(options_head, "Guia", self.show_options_guide, "ghost").grid(row=0, column=1, sticky="e")
         tk.Label(
             options_head,
             text="Elige un ajuste rapido o modifica solo lo necesario. Pasa el cursor por una opcion para ver para que sirve.",
             bg=self.colors["surface"],
             fg=self.colors["muted"],
             font=("Segoe UI", 9),
-        ).grid(row=1, column=0, columnspan=5, sticky="w", pady=(4, 0))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        self._field_label(options, "Ajuste rapido", "Atajo que rellena varias opciones segun el tipo de resultado que buscas.").grid(
-            row=1, column=0, sticky="w", padx=(16, 8), pady=(0, 10)
-        )
+        self._build_options_sections(options)
+
+        footer = tk.Frame(self, bg=self.colors["bg"])
+        footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
+        footer.columnconfigure(0, weight=1)
+        footer_status = tk.Frame(footer, bg=self.colors["bg"])
+        footer_status.grid(row=0, column=0, sticky="ew")
+        tk.Label(footer_status, textvariable=self.status, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
+        tk.Label(footer_status, textvariable=self.throughput_info, bg=self.colors["bg"], fg=self.colors["success"], font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w")
+        self.progress_bar = ttk.Progressbar(footer, variable=self.progress, maximum=100, style="Horizontal.TProgressbar")
+        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(14, 12), ipady=3)
+        footer.columnconfigure(1, weight=1)
+        self.retry_button = self._button(footer, "Reintentar", self.retry_failed, "ghost")
+        self.retry_button.grid(row=0, column=2, sticky="e")
+        self.repeat_button = self._button(footer, "Repetir", self.repeat_last_conversion, "ghost")
+        self.repeat_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.pause_button = self._button(footer, "Pausar", self.toggle_pause_conversion, "ghost")
+        self.pause_button.grid(row=0, column=4, sticky="e", padx=(8, 0))
+        self.pause_button.configure(state=tk.DISABLED)
+        self.convert_button = self._button(footer, "Convertir", self.start_conversion, "primary")
+        self.convert_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
+        self.cancel_button = self._button(footer, "Cancelar", self.cancel_conversion, "ghost")
+        self.cancel_button.grid(row=0, column=6, sticky="e", padx=(8, 0))
+        self.cancel_button.configure(state=tk.DISABLED)
+
+        self.bind_all("<Delete>", self._delete_shortcut)
+        self.bind_all("<Control-o>", lambda _event: self.add_files())
+        self.bind_all("<Control-Return>", lambda _event: self.start_conversion())
+        self.bind_all("<Escape>", lambda _event: self.cancel_conversion() if self.conversion_running else None)
+        self.bind_all("<Control-a>", self._select_all_files)
+
+    def _build_options_sections(self, options: tk.Frame) -> None:
+        notebook = ttk.Notebook(options)
+        notebook.grid(row=1, column=0, columnspan=10, sticky="ew", padx=16, pady=(0, 14))
+
+        salida = self._option_tab(notebook)
+        tamano = self._option_tab(notebook)
+        edicion = self._option_tab(notebook)
+        nombres = self._option_tab(notebook)
+        avanzado = self._option_tab(notebook)
+        notebook.add(salida, text="Salida")
+        notebook.add(tamano, text="Tamano y fondo")
+        notebook.add(edicion, text="Edicion")
+        notebook.add(nombres, text="Nombre y perfiles")
+        notebook.add(avanzado, text="Avanzado")
+
+        for tab in (salida, tamano, edicion, nombres, avanzado):
+            for column in range(8):
+                tab.columnconfigure(column, weight=1 if column in {1, 3, 5, 7} else 0)
+
+        self._field_label(salida, "Ajuste rapido", "Atajo que rellena opciones segun el tipo de resultado.").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(12, 10))
         self.preset_combo = ttk.Combobox(
-            options,
+            salida,
             values=[
                 "Personalizado",
                 "Para web",
@@ -1248,6 +1545,8 @@ class ImageConverterApp(TkBase):
                 "Impresion",
                 "Maxima calidad",
                 "Reducir peso",
+                "Maximo ahorro",
+                "Sin perdida",
                 "Icono .ico",
                 "PDF desde imagenes",
                 "SVG vector",
@@ -1257,206 +1556,153 @@ class ImageConverterApp(TkBase):
             state="readonly",
             width=18,
         )
-        self._tooltip(self.preset_combo, "Atajos para web, redes, impresion, producto, SVG, fondo transparente y PDF.")
+        self._tooltip(self.preset_combo, "Presets para web, redes, producto, SVG, fondo transparente, PDF y ahorro.")
         self.preset_combo.set("Personalizado")
-        self.preset_combo.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+        self.preset_combo.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(12, 10))
         self.preset_combo.bind("<<ComboboxSelected>>", self.apply_preset)
 
-        self._field_label(options, "Formato principal", "Formato principal que se generara para cada imagen.").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 10))
-        self.format_combo = ttk.Combobox(
-            options,
-            textvariable=self.output_format,
-            values=list(OUTPUT_FORMATS.keys()),
-            state="readonly",
-            width=12,
-        )
-        self._tooltip(self.format_combo, "Ejemplo: WEBP para web, JPG para compatibilidad, PNG si necesitas transparencia, PDF para documentos.")
-        self.format_combo.grid(row=1, column=3, sticky="ew", padx=(0, 10), pady=(0, 10))
+        self._field_label(salida, "Formato", "Formato principal que se generara.").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=(12, 10))
+        self.format_combo = ttk.Combobox(salida, textvariable=self.output_format, values=list(OUTPUT_FORMATS.keys()), state="readonly", width=12)
+        self._tooltip(self.format_combo, "WEBP para web, JPG para compatibilidad, PNG para transparencia, PDF para documentos.")
+        self.format_combo.grid(row=0, column=3, sticky="ew", padx=(0, 14), pady=(12, 10))
         self.format_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_option_states())
 
-        self._field_label(options, "Calidad / compresion", "Solo afecta JPG, JPEG, WEBP y AVIF. Mas calidad = mejor imagen y mas peso.").grid(
-            row=1, column=4, sticky="w", padx=(0, 8), pady=(0, 10)
-        )
-        self.quality_scale = ttk.Scale(options, from_=1, to=100, variable=self.quality, orient="horizontal")
-        self._tooltip(self.quality_scale, "85 es buen balance. Si activas peso objetivo, Converter ajusta la calidad para acercarse a ese limite.")
-        self.quality_scale.grid(row=1, column=5, sticky="ew", padx=(0, 6), pady=(0, 10))
-        self.quality_label = tk.Label(options, text=str(self.quality.get()), width=8, bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 10))
-        self.quality_label.grid(row=1, column=6, sticky="w", pady=(0, 10))
+        self._field_label(salida, "Extras", "Crea copias adicionales aparte del formato principal.").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=(12, 10))
+        self.extra_formats_entry = ttk.Entry(salida, textvariable=self.extra_formats, width=16)
+        self._tooltip(self.extra_formats_entry, "Opcional. Formatos separados por coma: PNG,JPG,AVIF.")
+        self.extra_formats_entry.grid(row=0, column=5, sticky="ew", padx=(0, 14), pady=(12, 10))
 
-        self._check(
-            options,
-            "Un solo PDF",
-            self.combine_pdf,
-            self._refresh_option_states,
-            "Une todas las imagenes en un unico PDF. El orden de la cola importa.",
-        ).grid(row=1, column=7, sticky="w", padx=(14, 0), pady=(0, 10))
-        self._field_label(options, "Formatos extra", "Crea copias adicionales aparte del formato principal.").grid(
-            row=1, column=8, sticky="e", padx=(10, 8), pady=(0, 10)
-        )
-        self.extra_formats_entry = ttk.Entry(options, textvariable=self.extra_formats, width=14)
-        self._tooltip(self.extra_formats_entry, "Opcional. Escribe formatos separados por coma, por ejemplo: PNG,JPG,AVIF.")
-        self.extra_formats_entry.grid(row=1, column=9, sticky="ew", padx=(0, 16), pady=(0, 10))
+        self._field_label(salida, "Calidad", "Afecta JPG, JPEG, WEBP y AVIF.").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 10))
+        self.quality_scale = ttk.Scale(salida, from_=1, to=100, variable=self.quality, orient="horizontal")
+        self._tooltip(self.quality_scale, "85 es buen balance. Con peso maximo, Converter ajusta calidad automaticamente.")
+        self.quality_scale.grid(row=1, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(0, 10))
+        self.quality_label = tk.Label(salida, text=str(self.quality.get()), width=8, bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 10))
+        self.quality_label.grid(row=1, column=4, sticky="w", pady=(0, 10))
+        self.lossless_check = self._check(salida, "Sin perdida", self.lossless, self._refresh_option_states, "Usa WebP sin perdida cuando el formato lo permite.")
+        self.lossless_check.grid(row=1, column=5, sticky="w", padx=(0, 10), pady=(0, 10))
+        self._check(salida, "Un solo PDF", self.combine_pdf, self._refresh_option_states, "Une todas las imagenes en un unico PDF.").grid(row=1, column=6, sticky="w", pady=(0, 10))
 
-        self._field_label(options, "Carpeta de salida", "Lugar donde se guardaran los archivos convertidos.").grid(
-            row=2, column=0, sticky="w", padx=(16, 8), pady=(0, 10)
-        )
-        output_entry = ttk.Entry(options, textvariable=self.output_dir)
+        self._field_label(salida, "Carpeta salida", "Donde se guardan los archivos convertidos.").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(0, 12))
+        output_entry = ttk.Entry(salida, textvariable=self.output_dir)
         self._tooltip(output_entry, "Puedes escribir una ruta o usar Elegir. Si no existe, Converter intenta crearla.")
-        output_entry.grid(row=2, column=1, columnspan=6, sticky="ew", padx=(0, 10), pady=(0, 10))
-        self._button(options, "Elegir...", self.choose_output_dir, "ghost").grid(row=2, column=7, sticky="ew", padx=(0, 8), pady=(0, 10))
-        self._button(options, "Abrir carpeta", self.open_output_dir, "ghost").grid(row=2, column=8, sticky="ew", pady=(0, 10))
+        output_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(salida, "Elegir...", self.choose_output_dir, "ghost").grid(row=2, column=4, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(salida, "Abrir", self.open_output_dir, "ghost").grid(row=2, column=5, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._check(salida, "Subcarpeta Converter_Output", self.use_output_subfolder, self._handle_output_option_change, "Guarda todo dentro de una subcarpeta limpia.").grid(row=2, column=6, sticky="w", pady=(0, 12))
+        self._check(salida, "Mantener carpetas", self.keep_folder_structure, self._handle_output_option_change, "Conserva la estructura relativa al agregar carpetas.").grid(row=2, column=7, sticky="w", pady=(0, 12))
 
-        self._check(
-            options,
-            "Cambiar tamano",
-            self.resize_enabled,
-            self._refresh_option_states,
-            "Activa Ancho/Alto para reducir o ampliar imagenes.",
-        ).grid(row=3, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
-        self._field_label(options, "Ancho px", "Ancho final en pixeles. Puedes dejarlo vacio.").grid(row=3, column=1, sticky="e", padx=(0, 8), pady=(0, 10))
-        self.resize_width_entry = ttk.Entry(options, textvariable=self.resize_width, width=8)
-        self._tooltip(self.resize_width_entry, "Ejemplo: 1600. Si mantienes proporcion, el alto se calcula automaticamente si lo dejas vacio.")
-        self.resize_width_entry.grid(row=3, column=2, sticky="ew", padx=(0, 12), pady=(0, 10))
-        self._field_label(options, "Alto px", "Alto final en pixeles. Puedes dejarlo vacio.").grid(row=3, column=3, sticky="e", padx=(0, 8), pady=(0, 10))
-        self.resize_height_entry = ttk.Entry(options, textvariable=self.resize_height, width=8)
-        self._tooltip(self.resize_height_entry, "Ejemplo: 1080. Si mantienes proporcion, el ancho se calcula automaticamente si lo dejas vacio.")
-        self.resize_height_entry.grid(row=3, column=4, sticky="ew", padx=(0, 12), pady=(0, 10))
-        self.keep_aspect_check = self._check(options, "Proporcion", self.keep_aspect, tooltip="Mantiene la proporcion original y evita que la imagen se deforme.")
-        self.keep_aspect_check.grid(row=3, column=5, sticky="w", padx=(0, 12), pady=(0, 10))
-        self.background_button = self._button(options, "Color fondo", self.choose_background, "ghost")
-        self._tooltip(self.background_button, "Color usado cuando el formato no conserva transparencia, como JPG, BMP o PDF.")
-        self.background_button.grid(row=3, column=6, sticky="ew", padx=(0, 8), pady=(0, 10))
-        self.color_swatch = tk.Label(
-            options,
-            textvariable=self.background_hex,
-            bg=self.background_hex.get(),
-            fg=self._text_color_for_background(self.background_hex.get()),
-            width=10,
-            relief="solid",
-            bd=1,
-            font=("Segoe UI", 9),
+        tk.Label(salida, textvariable=self.output_name_preview, bg=self.colors["surface"], fg=self.colors["primary"], font=("Segoe UI", 9, "bold")).grid(
+            row=3, column=0, columnspan=8, sticky="w", pady=(0, 12)
         )
-        self._tooltip(self.color_swatch, "Se usa cuando el formato no soporta transparencia, por ejemplo JPG, BMP o PDF.")
-        self.color_swatch.grid(row=3, column=7, columnspan=2, sticky="ew", pady=(0, 10))
 
-        self._field_label(options, "Nombre de archivo", "Define como se llamaran los archivos de salida.").grid(row=4, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
-        self.naming_combo = ttk.Combobox(
-            options,
-            textvariable=self.naming_mode,
-            values=["Conservar", "Numerado", "Prefijo/sufijo"],
-            state="readonly",
-            width=15,
-        )
-        self._tooltip(self.naming_combo, "Conservar usa el nombre original. Numerado agrega 001, 002... Prefijo/sufijo agrega texto antes o despues.")
-        self.naming_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._check(tamano, "Cambiar tamano", self.resize_enabled, self._refresh_option_states, "Activa Ancho/Alto para redimensionar.").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(12, 10))
+        self._field_label(tamano, "Ancho px", "Ancho final. Puedes dejarlo vacio.").grid(row=0, column=1, sticky="e", padx=(0, 8), pady=(12, 10))
+        self.resize_width_entry = ttk.Entry(tamano, textvariable=self.resize_width, width=9)
+        self.resize_width_entry.grid(row=0, column=2, sticky="ew", padx=(0, 14), pady=(12, 10))
+        self._field_label(tamano, "Alto px", "Alto final. Puedes dejarlo vacio.").grid(row=0, column=3, sticky="e", padx=(0, 8), pady=(12, 10))
+        self.resize_height_entry = ttk.Entry(tamano, textvariable=self.resize_height, width=9)
+        self.resize_height_entry.grid(row=0, column=4, sticky="ew", padx=(0, 14), pady=(12, 10))
+        self.keep_aspect_check = self._check(tamano, "Proporcion", self.keep_aspect, tooltip="Evita deformar la imagen.")
+        self.keep_aspect_check.grid(row=0, column=5, sticky="w", pady=(12, 10))
+
+        self._check(tamano, "Lienzo cuadrado", self.square_canvas, self._refresh_option_states, "Centra la imagen en un lienzo cuadrado.").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 10))
+        self._field_label(tamano, "Lado px", "Opcional. Si queda vacio usa el lado mayor.").grid(row=1, column=1, sticky="e", padx=(0, 8), pady=(0, 10))
+        self.canvas_size_entry = ttk.Entry(tamano, textvariable=self.canvas_size, width=9)
+        self.canvas_size_entry.grid(row=1, column=2, sticky="ew", padx=(0, 14), pady=(0, 10))
+        self._check(tamano, "Lienzo transparente", self.canvas_transparent, self._refresh_option_states, "Usa transparencia si el formato de salida la soporta.").grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(0, 10))
+        self.background_button = self._button(tamano, "Color fondo", self.choose_background, "ghost")
+        self._tooltip(self.background_button, "Color usado en JPG, BMP, PDF o lienzos no transparentes.")
+        self.background_button.grid(row=1, column=4, sticky="ew", padx=(0, 8), pady=(0, 10))
+        self.color_swatch = tk.Label(tamano, textvariable=self.background_hex, bg=self.background_hex.get(), fg=self._text_color_for_background(self.background_hex.get()), width=10, relief="solid", bd=1, font=("Segoe UI", 9))
+        self.color_swatch.grid(row=1, column=5, sticky="ew", pady=(0, 10))
+
+        self.remove_background_check = self._check(tamano, "Quitar fondo", self.remove_background, self._refresh_option_states, "Elimina fondos conectados a los bordes, sin IA pesada.")
+        self.remove_background_check.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(0, 12))
+        self._field_label(tamano, "Fuerza", "Sube si quedan bordes; baja si borra partes del objeto.").grid(row=2, column=1, sticky="e", padx=(0, 8), pady=(0, 12))
+        self.remove_background_scale = ttk.Scale(tamano, from_=8, to=96, variable=self.remove_background_tolerance, orient="horizontal")
+        self.remove_background_scale.grid(row=2, column=2, columnspan=2, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self.remove_background_label = tk.Label(tamano, text=str(self.remove_background_tolerance.get()), width=5, bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 10))
+        self.remove_background_label.grid(row=2, column=4, sticky="w", pady=(0, 12))
+        self._field_label(tamano, "Borde suave", "Suaviza halos del recorte de fondo.").grid(row=2, column=5, sticky="e", padx=(0, 8), pady=(0, 12))
+        self.remove_background_feather_spinbox = tk.Spinbox(tamano, from_=0, to=8, textvariable=self.remove_background_feather, width=5, **self._spinbox_style())
+        self.remove_background_feather_spinbox.grid(row=2, column=6, sticky="w", pady=(0, 12))
+
+        self._field_label(edicion, "Rotar", "Rotacion aplicada antes de convertir.").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(12, 10))
+        self.rotate_combo = ttk.Combobox(edicion, textvariable=self.rotate_degrees, values=[0, 90, 180, 270], state="readonly", width=8)
+        self.rotate_combo.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(12, 10))
+        self._check(edicion, "Voltear horizontal", self.flip_horizontal, self._handle_output_option_change, "Invierte izquierda/derecha.").grid(row=0, column=2, sticky="w", padx=(0, 12), pady=(12, 10))
+        self._check(edicion, "Voltear vertical", self.flip_vertical, self._handle_output_option_change, "Invierte arriba/abajo.").grid(row=0, column=3, sticky="w", pady=(12, 10))
+        self._check(edicion, "Recortar bordes", self.crop_enabled, self._refresh_option_states, "Recorta pixeles desde cada borde.").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 12))
+        for column, (label, variable) in enumerate((("Izq", self.crop_left), ("Arriba", self.crop_top), ("Der", self.crop_right), ("Abajo", self.crop_bottom)), start=1):
+            self._field_label(edicion, label, "Pixeles a recortar desde este borde.").grid(row=1, column=column * 2 - 1, sticky="e", padx=(0, 6), pady=(0, 12))
+            entry = ttk.Entry(edicion, textvariable=variable, width=7)
+            entry.grid(row=1, column=column * 2, sticky="ew", padx=(0, 10), pady=(0, 12))
+            setattr(self, f"crop_{label.lower()}_entry", entry)
+
+        self._field_label(nombres, "Modo nombre", "Controla nombres nuevos.").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(12, 10))
+        self.naming_combo = ttk.Combobox(nombres, textvariable=self.naming_mode, values=["Conservar", "Numerado", "Prefijo/sufijo", "Plantilla"], state="readonly", width=16)
+        self.naming_combo.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(12, 10))
         self.naming_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_option_states())
-        self._field_label(options, "Prefijo", "Texto que se agrega antes del nombre original cuando eliges Prefijo/sufijo.").grid(
-            row=4, column=2, sticky="e", padx=(0, 8), pady=(0, 16)
-        )
-        self.prefix_entry = ttk.Entry(options, textvariable=self.prefix, width=12)
-        self.prefix_entry.grid(row=4, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._field_label(options, "Sufijo", "Texto que se agrega al final del nombre original cuando eliges Prefijo/sufijo.").grid(
-            row=4, column=4, sticky="e", padx=(0, 8), pady=(0, 16)
-        )
-        self.suffix_entry = ttk.Entry(options, textvariable=self.suffix, width=12)
-        self.suffix_entry.grid(row=4, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._check(options, "Reemplazar existentes", self.overwrite, tooltip="Si existe un archivo con el mismo nombre, lo reemplaza. Si esta apagado, crea nombres nuevos.").grid(
-            row=4, column=6, sticky="w", pady=(0, 16)
-        )
+        self._field_label(nombres, "Plantilla", "{name}, {index}, {format}, {date}, {time}, {size}, {folder}.").grid(row=0, column=2, sticky="e", padx=(0, 8), pady=(12, 10))
+        self.naming_template_entry = ttk.Entry(nombres, textvariable=self.naming_template, width=26)
+        self.naming_template_entry.grid(row=0, column=3, columnspan=3, sticky="ew", padx=(0, 14), pady=(12, 10))
+        self._check(nombres, "Reemplazar existentes", self.overwrite, tooltip="Si existe el nombre, lo reemplaza. Apagado crea nombres nuevos.").grid(row=0, column=6, sticky="w", pady=(12, 10))
 
-        self._field_label(options, "Perfil", "Guarda y carga combinaciones de opciones que usas seguido.").grid(row=5, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
-        self.profile_combo = ttk.Combobox(
-            options,
-            textvariable=self.profile_name,
-            values=sorted(self.profiles.keys()),
-            state="readonly",
-            width=18,
-        )
-        self._tooltip(self.profile_combo, "Selecciona un perfil guardado y pulsa Cargar. Pulsa Guardar para crear uno nuevo.")
-        self.profile_combo.grid(row=5, column=1, sticky="ew", padx=(0, 8), pady=(0, 16))
-        self._button(options, "Cargar", self.load_selected_profile, "ghost").grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=(0, 16))
-        self._button(options, "Guardar", self.save_current_profile, "ghost").grid(row=5, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._check(
-            options,
-            "Peso maximo (KB)",
-            self.target_size_enabled,
-            self._refresh_option_states,
-            "Intenta que cada archivo pese como maximo el numero de KB indicado. Solo aplica a formatos con calidad.",
-        ).grid(row=5, column=4, sticky="w", padx=(0, 8), pady=(0, 16))
-        self.target_size_entry = ttk.Entry(options, textvariable=self.target_size_kb, width=9)
-        self._tooltip(self.target_size_entry, "Ejemplo: 500 para intentar dejar cada imagen bajo 500 KB. Si es imposible, Converter avisa.")
-        self.target_size_entry.grid(row=5, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._field_label(options, "En paralelo", "Cantidad de conversiones simultaneas. Mas tareas puede ser mas rapido, pero usa mas CPU/RAM.").grid(
-            row=5, column=6, sticky="e", padx=(0, 8), pady=(0, 16)
-        )
-        self.max_workers_spinbox = tk.Spinbox(
-            options,
-            from_=1,
-            to=max(1, min(16, os.cpu_count() or 1)),
-            textvariable=self.max_workers,
-            width=5,
-            bg=self.colors["input"],
-            fg=self.colors["text"],
-            disabledbackground=self.colors["surface_soft"],
-            disabledforeground=self.colors["muted"],
-            insertbackground=self.colors["text"],
-            buttonbackground=self.colors["ghost"],
-            highlightbackground=self.colors["line"],
-            highlightcolor=self.colors["primary"],
-            highlightthickness=1,
-            relief="solid",
-            bd=1,
-            font=("Segoe UI", 9),
-        )
-        self._tooltip(self.max_workers_spinbox, "Recomendado: 2 a 4. Sube este valor si tienes CPU suficiente y archivos medianos.")
-        self.max_workers_spinbox.grid(row=5, column=7, sticky="w", pady=(0, 16))
-        self._check(options, "Quitar datos EXIF", self.strip_metadata, tooltip="Elimina datos como camara, fecha, GPS y otros metadatos cuando sea posible. Mejor para privacidad.").grid(
-            row=5, column=8, sticky="w", padx=(10, 8), pady=(0, 16)
-        )
-        self._check(options, "Abrir al final", self.open_output_when_done, tooltip="Abre automaticamente la carpeta de salida cuando termine la conversion.").grid(
-            row=5, column=9, sticky="w", padx=(0, 16), pady=(0, 16)
-        )
-        self.remove_background_check = self._check(
-            options,
-            "Quitar fondo",
-            self.remove_background,
-            self._refresh_option_states,
-            "Elimina fondos conectados a los bordes. Funciona mejor con fondos blancos, planos o de estudio.",
-        )
-        self.remove_background_check.grid(row=6, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
-        self._field_label(options, "Fuerza fondo", "Tolerancia de deteccion del fondo. Sube si quedan bordes; baja si borra partes del objeto.").grid(
-            row=6, column=1, sticky="e", padx=(0, 8), pady=(0, 16)
-        )
-        self.remove_background_scale = ttk.Scale(options, from_=8, to=96, variable=self.remove_background_tolerance, orient="horizontal")
-        self.remove_background_scale.grid(row=6, column=2, columnspan=3, sticky="ew", padx=(0, 8), pady=(0, 16))
-        self.remove_background_label = tk.Label(
-            options,
-            text=str(self.remove_background_tolerance.get()),
-            width=5,
-            bg=self.colors["surface"],
-            fg=self.colors["text"],
-            font=("Segoe UI", 10),
-        )
-        self.remove_background_label.grid(row=6, column=5, sticky="w", pady=(0, 16))
+        self._field_label(nombres, "Prefijo", "Texto antes del nombre original.").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 10))
+        self.prefix_entry = ttk.Entry(nombres, textvariable=self.prefix, width=14)
+        self.prefix_entry.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
+        self._field_label(nombres, "Sufijo", "Texto despues del nombre original.").grid(row=1, column=2, sticky="e", padx=(0, 8), pady=(0, 10))
+        self.suffix_entry = ttk.Entry(nombres, textvariable=self.suffix, width=14)
+        self.suffix_entry.grid(row=1, column=3, sticky="ew", padx=(0, 14), pady=(0, 10))
 
-        footer = tk.Frame(self, bg=self.colors["bg"])
-        footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
-        footer.columnconfigure(0, weight=1)
-        tk.Label(footer, textvariable=self.status, bg=self.colors["bg"], fg=self.colors["muted"], font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w")
-        self.progress_bar = ttk.Progressbar(footer, variable=self.progress, maximum=100, style="Horizontal.TProgressbar")
-        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(14, 12), ipady=3)
-        footer.columnconfigure(1, weight=1)
-        self.convert_button = self._button(footer, "Convertir", self.start_conversion, "primary")
-        self.convert_button.grid(row=0, column=2, sticky="e")
-        self.cancel_button = self._button(footer, "Cancelar", self.cancel_conversion, "ghost")
-        self.cancel_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
-        self.cancel_button.configure(state=tk.DISABLED)
+        self._field_label(nombres, "Perfil", "Guarda y carga combinaciones de opciones.").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(0, 12))
+        self.profile_combo = ttk.Combobox(nombres, textvariable=self.profile_name, values=sorted(self.profiles.keys()), state="readonly", width=18)
+        self.profile_combo.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(nombres, "Cargar", self.load_selected_profile, "ghost").grid(row=2, column=2, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(nombres, "Guardar", self.save_current_profile, "ghost").grid(row=2, column=3, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(nombres, "Importar", self.import_profiles, "ghost").grid(row=2, column=4, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(nombres, "Exportar", self.export_profiles, "ghost").grid(row=2, column=5, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(nombres, "Menu Windows", self.configure_context_menu, "ghost").grid(row=2, column=6, sticky="ew", pady=(0, 12))
 
-        self.bind_all("<Delete>", self._delete_shortcut)
-        self.bind_all("<Control-o>", lambda _event: self.add_files())
-        self.bind_all("<Control-Return>", lambda _event: self.start_conversion())
-        self.bind_all("<Escape>", lambda _event: self.cancel_conversion() if self.conversion_running else None)
-        self.bind_all("<Control-a>", self._select_all_files)
+        self._check(avanzado, "Peso maximo (KB)", self.target_size_enabled, self._refresh_option_states, "Intenta limitar el peso por archivo.").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(12, 10))
+        self.target_size_entry = ttk.Entry(avanzado, textvariable=self.target_size_kb, width=9)
+        self.target_size_entry.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=(12, 10))
+        self._field_label(avanzado, "En paralelo", "Conversiones simultaneas.").grid(row=0, column=2, sticky="e", padx=(0, 8), pady=(12, 10))
+        self.max_workers_spinbox = tk.Spinbox(avanzado, from_=1, to=max(1, min(16, os.cpu_count() or 1)), textvariable=self.max_workers, width=5, **self._spinbox_style())
+        self.max_workers_spinbox.grid(row=0, column=3, sticky="w", padx=(0, 14), pady=(12, 10))
+        self._check(avanzado, "Quitar datos EXIF", self.strip_metadata, tooltip="Elimina datos privados como camara, fecha o GPS.").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=(12, 10))
+        self._check(avanzado, "Abrir al final", self.open_output_when_done, tooltip="Abre la carpeta al terminar.").grid(row=0, column=5, sticky="w", pady=(12, 10))
+
+        self._check(avanzado, "Regla archivos pesados", self.large_file_rule_enabled, self._refresh_option_states, "Si el archivo supera el limite, usa calidad especial para ahorrar peso.").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 12))
+        self._field_label(avanzado, "Mayor a KB", "Umbral para aplicar la regla.").grid(row=1, column=1, sticky="e", padx=(0, 8), pady=(0, 12))
+        self.large_file_threshold_entry = ttk.Entry(avanzado, textvariable=self.large_file_threshold_kb, width=9)
+        self.large_file_threshold_entry.grid(row=1, column=2, sticky="ew", padx=(0, 14), pady=(0, 12))
+        self._field_label(avanzado, "Calidad regla", "Calidad usada cuando el archivo supera el umbral.").grid(row=1, column=3, sticky="e", padx=(0, 8), pady=(0, 12))
+        self.large_file_quality_spinbox = tk.Spinbox(avanzado, from_=15, to=95, textvariable=self.large_file_quality, width=5, **self._spinbox_style())
+        self.large_file_quality_spinbox.grid(row=1, column=4, sticky="w", padx=(0, 14), pady=(0, 12))
+        self._button(avanzado, "Exportar ajustes", self.export_settings, "ghost").grid(row=1, column=5, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(avanzado, "Importar ajustes", self.import_settings, "ghost").grid(row=1, column=6, sticky="ew", padx=(0, 8), pady=(0, 12))
+        self._button(avanzado, "Guia", self.show_options_guide, "ghost").grid(row=1, column=7, sticky="ew", pady=(0, 12))
+
+    def _option_tab(self, notebook: ttk.Notebook) -> tk.Frame:
+        frame = tk.Frame(notebook, bg=self.colors["surface"], padx=12, pady=2)
+        return frame
+
+    def _spinbox_style(self) -> dict:
+        return {
+            "bg": self.colors["input"],
+            "fg": self.colors["text"],
+            "disabledbackground": self.colors["surface_soft"],
+            "disabledforeground": self.colors["muted"],
+            "insertbackground": self.colors["text"],
+            "buttonbackground": self.colors["ghost"],
+            "highlightbackground": self.colors["line"],
+            "highlightcolor": self.colors["primary"],
+            "highlightthickness": 1,
+            "relief": "solid",
+            "bd": 1,
+            "font": ("Segoe UI", 9),
+        }
 
     def _card(self, parent) -> tk.Frame:
         return tk.Frame(parent, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
@@ -1596,6 +1842,7 @@ class ImageConverterApp(TkBase):
                 metadata = describe_image(resolved)
                 self.metadata_cache[resolved] = metadata
             image_format, dimensions, details, weight = metadata
+            details = self._details_with_flags(resolved, image_format, details)
             thumbnail = self._thumbnail_for_path(resolved)
             self.file_tree.insert(
                 "",
@@ -1626,6 +1873,20 @@ class ImageConverterApp(TkBase):
             self.file_tree.selection_set(first)
             self.file_tree.focus(first)
             self.update_preview()
+
+    def _details_with_flags(self, path: Path, image_format: str, details: str) -> str:
+        flags: list[str] = []
+        if image_format.startswith("RAW"):
+            flags.append("RAW")
+        if "transparencia" in details:
+            flags.append("Transp.")
+        if "frames" in details:
+            flags.append("Animada")
+        if path.exists() and path.stat().st_size >= 5 * 1024 * 1024:
+            flags.append("Pesado")
+        if "No se pudo" in details or "no soportado" in details.lower():
+            flags.append("Revisar")
+        return f"{details} | {', '.join(flags)}" if flags else details
 
     def _filtered_files(self) -> list[Path]:
         status_filter = self.filter_status.get()
@@ -1738,20 +1999,24 @@ class ImageConverterApp(TkBase):
         thread.start()
 
     def _expand_and_add_paths_worker(self, paths: list[Path]) -> None:
-        expanded_paths: list[Path] = []
+        expanded_paths: list[tuple[Path, Path | None]] = []
         for path in paths:
             if path.is_dir():
-                expanded_paths.extend(self._iter_images(path))
+                try:
+                    root = path.resolve()
+                except OSError:
+                    root = path
+                expanded_paths.extend((image_path, root) for image_path in self._iter_images(path))
             else:
-                expanded_paths.append(path)
+                expanded_paths.append((path, None))
         self._scan_paths(expanded_paths)
 
     def _add_paths(self, paths) -> None:
         self.status.set("Leyendo y autodetectando metadatos...")
-        thread = threading.Thread(target=self._scan_paths, args=(list(paths),), daemon=True)
+        thread = threading.Thread(target=self._scan_paths, args=([(Path(path), None) for path in paths],), daemon=True)
         thread.start()
 
-    def _scan_paths(self, paths: list[Path]) -> None:
+    def _scan_paths(self, paths: list[tuple[Path, Path | None]]) -> None:
         existing = {path.resolve() for path in self.files}
         existing_signatures: set[str] = set()
         for current in list(self.files):
@@ -1761,12 +2026,12 @@ class ImageConverterApp(TkBase):
                 continue
             self.file_signatures[current] = signature
             existing_signatures.add(signature)
-        entries: list[tuple[Path, tuple[str, str, str, str], str]] = []
+        entries: list[tuple[Path, tuple[str, str, str, str], str, Path | None]] = []
         added = 0
         rejected = 0
         duplicates = 0
 
-        for path in paths:
+        for path, root in paths:
             try:
                 resolved = path.resolve()
             except OSError:
@@ -1793,26 +2058,28 @@ class ImageConverterApp(TkBase):
                 self.metadata_cache[resolved] = metadata
             existing.add(resolved)
             existing_signatures.add(signature)
-            entries.append((resolved, metadata, signature))
+            entries.append((resolved, metadata, signature, root.resolve() if root is not None else resolved.parent))
             added += 1
 
         self.after(0, lambda: self._insert_scanned_paths(entries, added, rejected, duplicates))
 
     def _insert_scanned_paths(
         self,
-        entries: list[tuple[Path, tuple[str, str, str, str], str]],
+        entries: list[tuple[Path, tuple[str, str, str, str], str, Path | None]],
         added: int,
         rejected: int,
         duplicates: int,
     ) -> None:
         existing = set(self.files)
-        for resolved, metadata, signature in entries:
+        for resolved, metadata, signature, root in entries:
             if resolved in existing:
                 continue
             self.files.append(resolved)
             self.file_status[resolved] = "Pendiente"
             self.file_estimates[resolved] = "Pendiente"
             self.file_signatures[resolved] = signature
+            if root is not None:
+                self.file_roots[resolved] = root
             existing.add(resolved)
         self._refresh_file_tree()
         self._queue_file_estimates(250)
@@ -1837,6 +2104,7 @@ class ImageConverterApp(TkBase):
             self.file_status.pop(path, None)
             self.file_estimates.pop(path, None)
             self.file_signatures.pop(path, None)
+            self.file_roots.pop(path, None)
             self.thumbnail_images.pop(path, None)
             self.metadata_cache.pop(path, None)
         self._refresh_file_tree()
@@ -1847,6 +2115,7 @@ class ImageConverterApp(TkBase):
             self.preview_estimate_request_id += 1
             self.file_estimate_request_id += 1
             self.preview_estimate_info.set("Peso estimado de salida: selecciona una imagen.")
+            self.output_name_preview.set("Salida: selecciona una imagen.")
         if not self.files:
             self.batch_summary_info.set("Ahorro total: usa Estimar lote para calcular el lote completo.")
         self.status.set(f"{len(self.files)} imagen(es) listas.")
@@ -1859,6 +2128,7 @@ class ImageConverterApp(TkBase):
         self.file_status.clear()
         self.file_estimates.clear()
         self.file_signatures.clear()
+        self.file_roots.clear()
         self.thumbnail_images.clear()
         self.metadata_cache.clear()
         for item in self.file_tree.get_children():
@@ -1869,6 +2139,7 @@ class ImageConverterApp(TkBase):
         self.preview_estimate_request_id += 1
         self.file_estimate_request_id += 1
         self.preview_estimate_info.set("Peso estimado de salida: selecciona una imagen.")
+        self.output_name_preview.set("Salida: selecciona una imagen.")
         self.batch_summary_info.set("Ahorro total: usa Estimar lote para calcular el lote completo.")
         self.status.set("Lista limpia.")
 
@@ -1917,7 +2188,7 @@ class ImageConverterApp(TkBase):
             self.file_tree.set(item, "status", status)
 
     def _set_file_estimate(self, request_id: int, path: Path, estimate: str) -> None:
-        if request_id != self.file_estimate_request_id:
+        if request_id >= 0 and request_id != self.file_estimate_request_id:
             return
         self.file_estimates[path] = estimate
         item = str(path)
@@ -2068,12 +2339,34 @@ class ImageConverterApp(TkBase):
             self.resize_height,
             self.keep_aspect,
             self.background_hex,
+            self.lossless,
+            self.keep_folder_structure,
+            self.use_output_subfolder,
             self.combine_pdf,
             self.target_size_enabled,
             self.target_size_kb,
             self.strip_metadata,
             self.remove_background,
             self.remove_background_tolerance,
+            self.remove_background_feather,
+            self.rotate_degrees,
+            self.flip_horizontal,
+            self.flip_vertical,
+            self.crop_enabled,
+            self.crop_left,
+            self.crop_top,
+            self.crop_right,
+            self.crop_bottom,
+            self.square_canvas,
+            self.canvas_size,
+            self.canvas_transparent,
+            self.naming_mode,
+            self.naming_template,
+            self.prefix,
+            self.suffix,
+            self.large_file_rule_enabled,
+            self.large_file_threshold_kb,
+            self.large_file_quality,
         )
         for variable in variables:
             variable.trace_add("write", self._handle_output_option_change)
@@ -2083,6 +2376,7 @@ class ImageConverterApp(TkBase):
             self._refresh_option_states()
         self._queue_selected_output_estimate()
         self._queue_file_estimates()
+        self._update_output_name_preview()
 
     def _queue_selected_output_estimate(self, delay_ms: int = 300) -> None:
         if not hasattr(self, "preview_estimate_info"):
@@ -2120,7 +2414,7 @@ class ImageConverterApp(TkBase):
             input_bytes = path.stat().st_size
             estimates: list[tuple[str, int]] = []
             for output_format in options.output_formats:
-                format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                format_options = self._effective_format_options(options, path, output_format)
                 estimates.append((output_format, estimate_final_output_size(path, format_options)))
             text = format_output_estimate_summary(input_bytes, estimates)
             if options.combine_pdf and "PDF" in options.output_formats:
@@ -2136,6 +2430,25 @@ class ImageConverterApp(TkBase):
         if not selected or Path(selected[0]) != path:
             return
         self.preview_estimate_info.set(text)
+
+    def _update_output_name_preview(self) -> None:
+        if not hasattr(self, "output_name_preview") or not hasattr(self, "file_tree"):
+            return
+        selected = self.file_tree.selection()
+        if not selected:
+            self.output_name_preview.set("Salida: selecciona una imagen.")
+            return
+        options = self._read_options(show_errors=False)
+        if options is None:
+            self.output_name_preview.set("Salida: completa opciones validas.")
+            return
+        path = Path(selected[0])
+        try:
+            output_path = build_output_path(path, options.output_dir, options, 1, source_root=self.file_roots.get(path))
+            suffix = " + extras" if len(options.output_formats) > 1 else ""
+            self.output_name_preview.set(f"Salida prevista: {output_path}{suffix}")
+        except Exception:
+            self.output_name_preview.set("Salida: no disponible.")
 
     def _queue_file_estimates(self, delay_ms: int = 650) -> None:
         if not hasattr(self, "file_tree") or not self.files:
@@ -2165,8 +2478,24 @@ class ImageConverterApp(TkBase):
             options.target_size_enabled,
             options.target_size_kb,
             options.strip_metadata,
+            options.lossless,
             options.remove_background,
             options.remove_background_tolerance,
+            options.remove_background_feather,
+            options.rotate_degrees,
+            options.flip_horizontal,
+            options.flip_vertical,
+            options.crop_enabled,
+            options.crop_left,
+            options.crop_top,
+            options.crop_right,
+            options.crop_bottom,
+            options.square_canvas,
+            options.canvas_size,
+            options.canvas_transparent,
+            options.large_file_rule_enabled,
+            options.large_file_threshold_kb,
+            options.large_file_quality,
         )
 
     def _start_file_estimates(self) -> None:
@@ -2202,7 +2531,7 @@ class ImageConverterApp(TkBase):
                     else:
                         estimates: list[tuple[str, int]] = []
                         for output_format in formats:
-                            format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                            format_options = self._effective_format_options(options, path, output_format)
                             estimates.append((output_format, estimate_final_output_size(path, format_options)))
                         estimate = format_estimate_cell(estimates)
                         if options.combine_pdf and "PDF" in options.output_formats:
@@ -2306,8 +2635,10 @@ class ImageConverterApp(TkBase):
                 metadata = describe_image(path)
                 self.metadata_cache[path] = metadata
             image_format, dimensions, details, weight = metadata
+            details = self._details_with_flags(path, image_format, details)
             self.preview_info.set(f"{path.name} | {image_format} | {dimensions} | {weight} | {details}")
             self._queue_selected_output_estimate(120)
+            self._update_output_name_preview()
         except Exception as exc:
             self.preview_info.set(f"No se pudo previsualizar: {exc}")
             self.preview_estimate_info.set("Peso estimado de salida: no disponible para esta imagen.")
@@ -2318,7 +2649,8 @@ class ImageConverterApp(TkBase):
             self.output_dir.set(folder)
 
     def open_output_dir(self) -> None:
-        output_dir = Path(self.output_dir.get()).expanduser()
+        options = self._read_options(show_errors=False)
+        output_dir = options.output_dir if options is not None else Path(self.output_dir.get()).expanduser()
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
             os.startfile(output_dir)
@@ -2423,7 +2755,7 @@ class ImageConverterApp(TkBase):
             for source in files:
                 for output_format in formats:
                     try:
-                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                        format_options = self._effective_format_options(options, source, output_format)
                         output_bytes += estimate_final_output_size(source, format_options)
                     except Exception as exc:
                         errors.append(f"{source.name} ({output_format}): {exc}")
@@ -2450,6 +2782,7 @@ class ImageConverterApp(TkBase):
 
     def cancel_conversion(self) -> None:
         self.cancel_event.set()
+        self.pause_event.clear()
         self.status.set("Cancelando conversion...")
 
     def _load_settings(self) -> dict:
@@ -2482,6 +2815,7 @@ class ImageConverterApp(TkBase):
         self.naming_mode.set(data.get("naming_mode", self.naming_mode.get()))
         self.prefix.set(data.get("prefix", self.prefix.get()))
         self.suffix.set(data.get("suffix", self.suffix.get()))
+        self.naming_template.set(data.get("naming_template", self.naming_template.get()))
         self.overwrite.set(data.get("overwrite", self.overwrite.get()))
         self.combine_pdf.set(data.get("combine_pdf", self.combine_pdf.get()))
         self.target_size_enabled.set(data.get("target_size_enabled", self.target_size_enabled.get()))
@@ -2489,8 +2823,26 @@ class ImageConverterApp(TkBase):
         self.max_workers.set(data.get("max_workers", self.max_workers.get()))
         self.strip_metadata.set(data.get("strip_metadata", self.strip_metadata.get()))
         self.open_output_when_done.set(data.get("open_output_when_done", self.open_output_when_done.get()))
+        self.lossless.set(data.get("lossless", self.lossless.get()))
+        self.keep_folder_structure.set(data.get("keep_folder_structure", self.keep_folder_structure.get()))
+        self.use_output_subfolder.set(data.get("use_output_subfolder", self.use_output_subfolder.get()))
         self.remove_background.set(data.get("remove_background", self.remove_background.get()))
         self.remove_background_tolerance.set(data.get("remove_background_tolerance", self.remove_background_tolerance.get()))
+        self.remove_background_feather.set(data.get("remove_background_feather", self.remove_background_feather.get()))
+        self.rotate_degrees.set(data.get("rotate_degrees", self.rotate_degrees.get()))
+        self.flip_horizontal.set(data.get("flip_horizontal", self.flip_horizontal.get()))
+        self.flip_vertical.set(data.get("flip_vertical", self.flip_vertical.get()))
+        self.crop_enabled.set(data.get("crop_enabled", self.crop_enabled.get()))
+        self.crop_left.set(data.get("crop_left", self.crop_left.get()))
+        self.crop_top.set(data.get("crop_top", self.crop_top.get()))
+        self.crop_right.set(data.get("crop_right", self.crop_right.get()))
+        self.crop_bottom.set(data.get("crop_bottom", self.crop_bottom.get()))
+        self.square_canvas.set(data.get("square_canvas", self.square_canvas.get()))
+        self.canvas_size.set(data.get("canvas_size", self.canvas_size.get()))
+        self.canvas_transparent.set(data.get("canvas_transparent", self.canvas_transparent.get()))
+        self.large_file_rule_enabled.set(data.get("large_file_rule_enabled", self.large_file_rule_enabled.get()))
+        self.large_file_threshold_kb.set(data.get("large_file_threshold_kb", self.large_file_threshold_kb.get()))
+        self.large_file_quality.set(data.get("large_file_quality", self.large_file_quality.get()))
         self.dark_mode.set(data.get("dark_mode", self.dark_mode.get()))
 
     def _save_settings(self) -> None:
@@ -2535,6 +2887,7 @@ class ImageConverterApp(TkBase):
             "naming_mode": self.naming_mode.get(),
             "prefix": self.prefix.get(),
             "suffix": self.suffix.get(),
+            "naming_template": self.naming_template.get(),
             "overwrite": self.overwrite.get(),
             "combine_pdf": self.combine_pdf.get(),
             "target_size_enabled": self.target_size_enabled.get(),
@@ -2542,8 +2895,26 @@ class ImageConverterApp(TkBase):
             "max_workers": int(self.max_workers.get()),
             "strip_metadata": self.strip_metadata.get(),
             "open_output_when_done": self.open_output_when_done.get(),
+            "lossless": self.lossless.get(),
+            "keep_folder_structure": self.keep_folder_structure.get(),
+            "use_output_subfolder": self.use_output_subfolder.get(),
             "remove_background": self.remove_background.get(),
             "remove_background_tolerance": int(self.remove_background_tolerance.get()),
+            "remove_background_feather": int(self.remove_background_feather.get()),
+            "rotate_degrees": int(self.rotate_degrees.get()),
+            "flip_horizontal": self.flip_horizontal.get(),
+            "flip_vertical": self.flip_vertical.get(),
+            "crop_enabled": self.crop_enabled.get(),
+            "crop_left": self.crop_left.get(),
+            "crop_top": self.crop_top.get(),
+            "crop_right": self.crop_right.get(),
+            "crop_bottom": self.crop_bottom.get(),
+            "square_canvas": self.square_canvas.get(),
+            "canvas_size": self.canvas_size.get(),
+            "canvas_transparent": self.canvas_transparent.get(),
+            "large_file_rule_enabled": self.large_file_rule_enabled.get(),
+            "large_file_threshold_kb": self.large_file_threshold_kb.get(),
+            "large_file_quality": int(self.large_file_quality.get()),
             "dark_mode": self.dark_mode.get(),
         }
 
@@ -2596,6 +2967,13 @@ class ImageConverterApp(TkBase):
         profile["target_size_kb"] = str(profile.get("target_size_kb", ""))
         profile["prefix"] = str(profile.get("prefix", ""))
         profile["suffix"] = str(profile.get("suffix", ""))
+        profile["naming_template"] = str(profile.get("naming_template", "{name}_{format}"))
+        profile["crop_left"] = str(profile.get("crop_left", "0"))
+        profile["crop_top"] = str(profile.get("crop_top", "0"))
+        profile["crop_right"] = str(profile.get("crop_right", "0"))
+        profile["crop_bottom"] = str(profile.get("crop_bottom", "0"))
+        profile["canvas_size"] = str(profile.get("canvas_size", ""))
+        profile["large_file_threshold_kb"] = str(profile.get("large_file_threshold_kb", "2048"))
         profile["background_hex"] = str(profile.get("background_hex", "#ffffff"))
         if profile["background_hex"].startswith("#"):
             try:
@@ -2604,7 +2982,7 @@ class ImageConverterApp(TkBase):
                 profile["background_hex"] = "#ffffff"
         else:
             profile["background_hex"] = "#ffffff"
-        if profile.get("naming_mode") not in {"Conservar", "Numerado", "Prefijo/sufijo"}:
+        if profile.get("naming_mode") not in {"Conservar", "Numerado", "Prefijo/sufijo", "Plantilla"}:
             profile["naming_mode"] = "Conservar"
         for key in (
             "resize_enabled",
@@ -2614,12 +2992,26 @@ class ImageConverterApp(TkBase):
             "target_size_enabled",
             "strip_metadata",
             "open_output_when_done",
+            "lossless",
+            "keep_folder_structure",
+            "use_output_subfolder",
             "remove_background",
+            "flip_horizontal",
+            "flip_vertical",
+            "crop_enabled",
+            "square_canvas",
+            "canvas_transparent",
+            "large_file_rule_enabled",
             "dark_mode",
         ):
             profile[key] = bool(profile.get(key))
         profile["max_workers"] = max(1, min(16, int_or_default(profile.get("max_workers"), min(4, max(1, os.cpu_count() or 1)))))
         profile["remove_background_tolerance"] = max(0, min(128, int_or_default(profile.get("remove_background_tolerance"), 32)))
+        profile["remove_background_feather"] = max(0, min(8, int_or_default(profile.get("remove_background_feather"), 1)))
+        profile["rotate_degrees"] = int_or_default(profile.get("rotate_degrees"), 0)
+        if profile["rotate_degrees"] not in {0, 90, 180, 270}:
+            profile["rotate_degrees"] = 0
+        profile["large_file_quality"] = max(15, min(95, int_or_default(profile.get("large_file_quality"), 72)))
         return profile
 
     def export_profiles(self) -> None:
@@ -2669,6 +3061,49 @@ class ImageConverterApp(TkBase):
         self.profile_combo.configure(values=sorted(self.profiles.keys()))
         self.status.set(f"Perfiles importados: {imported}.")
 
+    def export_settings(self) -> None:
+        destination = filedialog.asksaveasfilename(
+            title="Exportar ajustes",
+            defaultextension=".json",
+            filetypes=[("Ajustes JSON", "*.json"), ("Todos los archivos", "*.*")],
+        )
+        if not destination:
+            return
+        payload = {"app": APP_NAME, "version": APP_VERSION, "settings": {"output_dir": self.output_dir.get(), **self._current_profile_data()}}
+        try:
+            Path(destination).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            self.status.set(f"Ajustes exportados: {destination}")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudieron exportar los ajustes:\n{exc}")
+
+    def import_settings(self) -> None:
+        source = filedialog.askopenfilename(
+            title="Importar ajustes",
+            filetypes=[("Ajustes JSON", "*.json"), ("Todos los archivos", "*.*")],
+        )
+        if not source:
+            return
+        try:
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo leer el archivo de ajustes:\n{exc}")
+            return
+        data = payload.get("settings", payload) if isinstance(payload, dict) else {}
+        profile = self._validated_profile_data(data)
+        if profile is None:
+            messagebox.showerror(APP_NAME, "El archivo no contiene ajustes compatibles.")
+            return
+        if isinstance(data, dict) and data.get("output_dir"):
+            self.output_dir.set(str(data["output_dir"]))
+        temp_name = "__imported_settings__"
+        self.profiles[temp_name] = profile
+        self.profile_name.set(temp_name)
+        self.load_selected_profile()
+        self.profiles.pop(temp_name, None)
+        self.profile_name.set("")
+        self.profile_combo.configure(values=sorted(self.profiles.keys()))
+        self.status.set("Ajustes importados.")
+
     def load_selected_profile(self) -> None:
         name = self.profile_name.get()
         data = self.profiles.get(name)
@@ -2687,6 +3122,7 @@ class ImageConverterApp(TkBase):
         self.naming_mode.set(data.get("naming_mode", "Conservar"))
         self.prefix.set(data.get("prefix", ""))
         self.suffix.set(data.get("suffix", ""))
+        self.naming_template.set(data.get("naming_template", "{name}_{format}"))
         self.overwrite.set(data.get("overwrite", False))
         self.combine_pdf.set(data.get("combine_pdf", False))
         self.target_size_enabled.set(data.get("target_size_enabled", False))
@@ -2694,8 +3130,26 @@ class ImageConverterApp(TkBase):
         self.max_workers.set(data.get("max_workers", min(4, max(1, os.cpu_count() or 1))))
         self.strip_metadata.set(data.get("strip_metadata", True))
         self.open_output_when_done.set(data.get("open_output_when_done", True))
+        self.lossless.set(data.get("lossless", False))
+        self.keep_folder_structure.set(data.get("keep_folder_structure", False))
+        self.use_output_subfolder.set(data.get("use_output_subfolder", False))
         self.remove_background.set(data.get("remove_background", False))
         self.remove_background_tolerance.set(data.get("remove_background_tolerance", 32))
+        self.remove_background_feather.set(data.get("remove_background_feather", 1))
+        self.rotate_degrees.set(data.get("rotate_degrees", 0))
+        self.flip_horizontal.set(data.get("flip_horizontal", False))
+        self.flip_vertical.set(data.get("flip_vertical", False))
+        self.crop_enabled.set(data.get("crop_enabled", False))
+        self.crop_left.set(data.get("crop_left", "0"))
+        self.crop_top.set(data.get("crop_top", "0"))
+        self.crop_right.set(data.get("crop_right", "0"))
+        self.crop_bottom.set(data.get("crop_bottom", "0"))
+        self.square_canvas.set(data.get("square_canvas", False))
+        self.canvas_size.set(data.get("canvas_size", ""))
+        self.canvas_transparent.set(data.get("canvas_transparent", True))
+        self.large_file_rule_enabled.set(data.get("large_file_rule_enabled", False))
+        self.large_file_threshold_kb.set(data.get("large_file_threshold_kb", "2048"))
+        self.large_file_quality.set(data.get("large_file_quality", 72))
         requested_dark_mode = data.get("dark_mode", self.dark_mode.get())
         if requested_dark_mode != self.dark_mode.get():
             self.dark_mode.set(requested_dark_mode)
@@ -2738,6 +3192,11 @@ class ImageConverterApp(TkBase):
     def apply_preset(self, _event=None) -> None:
         preset = self.preset_combo.get()
         self.extra_formats.set("")
+        self.lossless.set(False)
+        self.target_size_enabled.set(False)
+        self.large_file_rule_enabled.set(False)
+        self.square_canvas.set(False)
+        self.crop_enabled.set(False)
         if preset == "Para web":
             self.output_format.set("WEBP")
             self.quality.set(82)
@@ -2786,6 +3245,25 @@ class ImageConverterApp(TkBase):
             self.keep_aspect.set(True)
             self.combine_pdf.set(False)
             self.remove_background.set(False)
+        elif preset == "Maximo ahorro":
+            self.output_format.set("WEBP")
+            self.quality.set(58)
+            self.resize_enabled.set(True)
+            self.resize_width.set("1200")
+            self.resize_height.set("")
+            self.keep_aspect.set(True)
+            self.combine_pdf.set(False)
+            self.large_file_rule_enabled.set(True)
+            self.large_file_threshold_kb.set("2048")
+            self.large_file_quality.set(50)
+            self.remove_background.set(False)
+        elif preset == "Sin perdida":
+            self.output_format.set("WEBP")
+            self.quality.set(100)
+            self.lossless.set(True)
+            self.resize_enabled.set(False)
+            self.combine_pdf.set(False)
+            self.remove_background.set(False)
         elif preset == "Icono .ico":
             self.output_format.set("ICO")
             self.resize_enabled.set(True)
@@ -2831,6 +3309,9 @@ class ImageConverterApp(TkBase):
             self.target_size_enabled.set(False)
             self.remove_background.set(True)
             self.remove_background_tolerance.set(34)
+            self.square_canvas.set(True)
+            self.canvas_size.set("1200")
+            self.canvas_transparent.set(False)
         self._refresh_quality_state()
 
     def _selected_output_formats(self, strict: bool = False) -> tuple[str, ...]:
@@ -2865,25 +3346,42 @@ class ImageConverterApp(TkBase):
         resize_enabled = self.resize_enabled.get()
         target_enabled = self.target_size_enabled.get() and quality_enabled
         prefix_enabled = self.naming_mode.get() == "Prefijo/sufijo"
+        template_enabled = self.naming_mode.get() == "Plantilla"
         background_enabled = any(not OUTPUT_FORMATS.get(fmt, {}).get("supports_alpha", False) for fmt in output_formats)
+        lossless_enabled = "WEBP" in output_formats
         remove_background_enabled = self.remove_background.get()
+        crop_enabled = self.crop_enabled.get()
+        square_enabled = self.square_canvas.get()
+        large_rule_enabled = self.large_file_rule_enabled.get() and quality_enabled
 
         self.quality_scale.configure(state=tk.NORMAL if quality_enabled else tk.DISABLED)
         self.quality_label.configure(text=str(self.quality.get()) if quality_enabled else "No aplica", foreground=self.colors["text"] if quality_enabled else self.colors["muted"])
+        self._set_widget_state("extra_formats_entry", True)
         self._set_widget_state("resize_width_entry", resize_enabled)
         self._set_widget_state("resize_height_entry", resize_enabled)
         self._set_widget_state("keep_aspect_check", resize_enabled)
         self._set_widget_state("target_size_entry", target_enabled)
         self._set_widget_state("prefix_entry", prefix_enabled)
         self._set_widget_state("suffix_entry", prefix_enabled)
+        self._set_widget_state("naming_template_entry", template_enabled)
+        self._set_widget_state("canvas_size_entry", square_enabled)
         self._set_widget_state("background_button", background_enabled)
+        self._set_widget_state("large_file_threshold_entry", large_rule_enabled)
+        self._set_widget_state("large_file_quality_spinbox", large_rule_enabled)
+        self._set_widget_state("remove_background_feather_spinbox", remove_background_enabled)
+        self._set_widget_state("lossless_check", lossless_enabled)
+        for widget_name in ("crop_izq_entry", "crop_arriba_entry", "crop_der_entry", "crop_abajo_entry"):
+            self._set_widget_state(widget_name, crop_enabled)
         self.remove_background_scale.configure(state=tk.NORMAL if remove_background_enabled else tk.DISABLED)
         self.remove_background_label.configure(
             text=str(int(float(self.remove_background_tolerance.get()))),
             foreground=self.colors["text"] if remove_background_enabled else self.colors["muted"],
         )
+        if not lossless_enabled and self.lossless.get():
+            self.lossless.set(False)
         if hasattr(self, "color_swatch"):
             self.color_swatch.configure(fg=self._text_color_for_background(self.background_hex.get()))
+        self._update_output_name_preview()
 
     def _read_options(self, show_errors: bool = True) -> ConversionOptions | None:
         try:
@@ -2894,6 +3392,19 @@ class ImageConverterApp(TkBase):
             target_size = int(self.target_size_kb.get()) if self.target_size_enabled.get() and self.target_size_kb.get().strip() else None
             max_workers = int(self.max_workers.get())
             remove_background_tolerance = int(float(self.remove_background_tolerance.get()))
+            remove_background_feather = int(float(self.remove_background_feather.get()))
+            rotate_degrees = int(self.rotate_degrees.get())
+            crop_left = int(self.crop_left.get()) if self.crop_enabled.get() and self.crop_left.get().strip() else 0
+            crop_top = int(self.crop_top.get()) if self.crop_enabled.get() and self.crop_top.get().strip() else 0
+            crop_right = int(self.crop_right.get()) if self.crop_enabled.get() and self.crop_right.get().strip() else 0
+            crop_bottom = int(self.crop_bottom.get()) if self.crop_enabled.get() and self.crop_bottom.get().strip() else 0
+            canvas_size = int(self.canvas_size.get()) if self.square_canvas.get() and self.canvas_size.get().strip() else None
+            large_file_threshold = (
+                int(self.large_file_threshold_kb.get())
+                if self.large_file_rule_enabled.get() and self.large_file_threshold_kb.get().strip()
+                else None
+            )
+            large_file_quality = int(self.large_file_quality.get())
             if width is not None and width <= 0 or height is not None and height <= 0:
                 raise ValueError("El ancho y alto deben ser mayores a cero.")
             if target_size is not None and target_size <= 0:
@@ -2902,16 +3413,32 @@ class ImageConverterApp(TkBase):
                 raise ValueError("La cantidad de procesos debe ser mayor a cero.")
             if remove_background_tolerance < 0:
                 raise ValueError("Fuerza fondo debe ser mayor o igual a cero.")
+            if remove_background_feather < 0:
+                raise ValueError("Borde suave debe ser mayor o igual a cero.")
+            if rotate_degrees not in {0, 90, 180, 270}:
+                raise ValueError("Rotar debe ser 0, 90, 180 o 270.")
+            if min(crop_left, crop_top, crop_right, crop_bottom) < 0:
+                raise ValueError("El recorte debe ser mayor o igual a cero.")
+            if canvas_size is not None and canvas_size <= 0:
+                raise ValueError("Lado de lienzo debe ser mayor a cero.")
+            if large_file_threshold is not None and large_file_threshold <= 0:
+                raise ValueError("Umbral de archivo pesado debe ser mayor a cero.")
+            if large_file_quality < 15 or large_file_quality > 95:
+                raise ValueError("Calidad de regla debe estar entre 15 y 95.")
         except ValueError as exc:
             if show_errors:
                 messagebox.showerror(APP_NAME, f"Opcion invalida:\n{exc}")
             return None
 
+        output_dir = Path(self.output_dir.get()).expanduser()
+        if self.use_output_subfolder.get():
+            output_dir = output_dir / "Converter_Output"
+
         return ConversionOptions(
             output_format=self.output_format.get(),
             output_formats=output_formats,
             quality=int(self.quality.get()),
-            output_dir=Path(self.output_dir.get()).expanduser(),
+            output_dir=output_dir,
             resize_enabled=self.resize_enabled.get(),
             width=width,
             height=height,
@@ -2920,6 +3447,7 @@ class ImageConverterApp(TkBase):
             naming_mode=self.naming_mode.get(),
             prefix=self.prefix.get(),
             suffix=self.suffix.get(),
+            naming_template=self.naming_template.get(),
             overwrite=self.overwrite.get(),
             combine_pdf=self.combine_pdf.get(),
             target_size_enabled=self.target_size_enabled.get(),
@@ -2927,13 +3455,40 @@ class ImageConverterApp(TkBase):
             max_workers=max(1, max_workers),
             strip_metadata=self.strip_metadata.get(),
             open_output_when_done=self.open_output_when_done.get(),
+            lossless=self.lossless.get(),
+            keep_folder_structure=self.keep_folder_structure.get(),
+            use_output_subfolder=self.use_output_subfolder.get(),
             remove_background=self.remove_background.get(),
             remove_background_tolerance=max(0, min(128, remove_background_tolerance)),
+            remove_background_feather=max(0, min(8, remove_background_feather)),
+            rotate_degrees=rotate_degrees,
+            flip_horizontal=self.flip_horizontal.get(),
+            flip_vertical=self.flip_vertical.get(),
+            crop_enabled=self.crop_enabled.get(),
+            crop_left=crop_left,
+            crop_top=crop_top,
+            crop_right=crop_right,
+            crop_bottom=crop_bottom,
+            square_canvas=self.square_canvas.get(),
+            canvas_size=canvas_size,
+            canvas_transparent=self.canvas_transparent.get(),
+            large_file_rule_enabled=self.large_file_rule_enabled.get(),
+            large_file_threshold_kb=large_file_threshold,
+            large_file_quality=max(15, min(95, large_file_quality)),
         )
 
     def start_conversion(self) -> None:
         if not self.files:
             messagebox.showwarning(APP_NAME, "Agrega al menos una imagen.")
+            return
+        self._start_conversion_for_files(list(self.files))
+
+    def _start_conversion_for_files(self, files: list[Path]) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Ya hay una conversion en curso.")
+            return
+        if not files:
+            messagebox.showwarning(APP_NAME, "No hay imagenes para convertir.")
             return
 
         options = self._read_options()
@@ -2946,22 +3501,71 @@ class ImageConverterApp(TkBase):
             messagebox.showerror(APP_NAME, f"No se pudo crear la carpeta de salida:\n{exc}")
             return
 
-        files = list(self.files)
         self._save_settings()
+        self.last_conversion_files = list(files)
         append_log(f"Inicio conversion: {len(files)} archivo(s), formatos={','.join(options.output_formats)}, salida={options.output_dir}")
         self.cancel_event.clear()
+        self.pause_event.clear()
         self.conversion_running = True
         self.convert_button.configure(state=tk.DISABLED)
+        self.pause_button.configure(state=tk.NORMAL, text="Pausar")
         self.cancel_button.configure(state=tk.NORMAL)
+        self.retry_button.configure(state=tk.DISABLED)
+        self.repeat_button.configure(state=tk.DISABLED)
         self.progress.set(0)
+        self.throughput_info.set("Preparando conversion...")
         thread = threading.Thread(target=self._convert_worker, args=(files, options), daemon=True)
         thread.start()
+
+    def retry_failed(self) -> None:
+        files = [path for path in self.last_failed_files if path.exists()]
+        if not files:
+            messagebox.showinfo(APP_NAME, "No hay archivos con error para reintentar.")
+            return
+        self._start_conversion_for_files(files)
+
+    def repeat_last_conversion(self) -> None:
+        files = [path for path in self.last_conversion_files if path.exists()]
+        if not files:
+            messagebox.showinfo(APP_NAME, "No hay una conversion anterior para repetir.")
+            return
+        self._start_conversion_for_files(files)
+
+    def toggle_pause_conversion(self) -> None:
+        if not self.conversion_running:
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.pause_button.configure(text="Pausar")
+            self.status.set("Conversion reanudada.")
+        else:
+            self.pause_event.set()
+            self.pause_button.configure(text="Reanudar")
+            self.status.set("Conversion pausada. Las tareas activas terminan y no se envian nuevas.")
+
+    def _wait_if_paused(self) -> None:
+        while self.pause_event.is_set() and not self.cancel_event.is_set():
+            time.sleep(0.15)
+
+    def _effective_format_options(self, options: ConversionOptions, source: Path, output_format: str) -> ConversionOptions:
+        quality = options.quality
+        if (
+            options.large_file_rule_enabled
+            and options.large_file_threshold_kb
+            and source.exists()
+            and source.stat().st_size > options.large_file_threshold_kb * 1024
+            and OUTPUT_FORMATS[output_format]["quality"]
+        ):
+            quality = min(quality, options.large_file_quality)
+        return replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False, quality=quality)
 
     def _convert_worker(self, files: list[Path], options: ConversionOptions) -> None:
         converted = 0
         errors: list[str] = []
+        failed_paths: list[Path] = []
         outputs: list[Path] = []
         cancelled = False
+        started_at = time.monotonic()
         input_bytes = sum(path.stat().st_size for path in files if path.exists())
         self.after(0, self._reset_file_statuses)
 
@@ -2986,14 +3590,19 @@ class ImageConverterApp(TkBase):
                     cancelled = True
                 else:
                     try:
+                        self._wait_if_paused()
                         pdf_options = replace(options, output_format="PDF", output_formats=("PDF",))
+                        destination.parent.mkdir(parents=True, exist_ok=True)
                         combine_images_to_pdf(files, destination, pdf_options)
                         outputs.append(destination)
                         converted += 1
+                        pdf_size = format_size(destination.stat().st_size)
                         for source in files:
                             self.after(0, lambda path=source: self._set_file_status(path, "PDF OK"))
+                            self.after(0, lambda path=source, text=f"{pdf_size} PDF": self._set_file_estimate(-1, path, text))
                     except Exception as exc:
                         errors.append(f"PDF unico: {exc}")
+                        failed_paths.extend(files)
                 completed += 1
                 total_jobs = max(1, len(files) * (len(formats) - 1) + 1)
                 self._set_progress(completed / total_jobs * 100)
@@ -3001,13 +3610,18 @@ class ImageConverterApp(TkBase):
 
             if formats and not cancelled:
                 job_iter = iter((index, source, output_format) for index, source in enumerate(files, start=1) for output_format in formats)
+                source_pending = {source: len(formats) for source in files}
+                source_failed: set[Path] = set()
+                actual_bytes_by_source: dict[Path, int] = {}
 
                 def convert_one(index: int, source: Path, output_format: str, destination: Path) -> tuple[bool, Path | None, str | None]:
                     if self.cancel_event.is_set():
                         return False, None, None
+                    self._wait_if_paused()
                     self.after(0, lambda path=source, fmt=output_format: self._set_file_status(path, f"{fmt}..."))
                     try:
-                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        format_options = self._effective_format_options(options, source, output_format)
                         convert_image_optimized(source, destination, format_options)
                         warning = None
                         if (
@@ -3029,12 +3643,15 @@ class ImageConverterApp(TkBase):
                     future_map: dict[concurrent.futures.Future, tuple[int, Path, str]] = {}
 
                     def submit_next() -> bool:
+                        self._wait_if_paused()
+                        if self.cancel_event.is_set():
+                            return False
                         try:
                             index, source, output_format = next(job_iter)
                         except StopIteration:
                             return False
-                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
-                        destination = build_output_path(source, options.output_dir, format_options, index, reserved_outputs)
+                        format_options = self._effective_format_options(options, source, output_format)
+                        destination = build_output_path(source, options.output_dir, format_options, index, reserved_outputs, self.file_roots.get(source))
                         future_map[executor.submit(convert_one, index, source, output_format, destination)] = (index, source, output_format)
                         return True
 
@@ -3050,17 +3667,33 @@ class ImageConverterApp(TkBase):
                         _index, source, output_format = future_map.pop(future)
                         if self.cancel_event.is_set():
                             cancelled = True
-                        self._set_status(f"Procesando {min(completed + 1, total_jobs)}/{total_jobs}: {source.name} -> {output_format}")
                         ok, output, error = future.result()
                         if ok and output is not None:
                             outputs.append(output)
                             converted += 1
-                            self.after(0, lambda path=source: self._set_file_status(path, "OK"))
+                            actual_bytes_by_source[source] = actual_bytes_by_source.get(source, 0) + output.stat().st_size
                         if error:
                             errors.append(error)
-                            if not ok:
-                                self.after(0, lambda path=source: self._set_file_status(path, "Error"))
+                            source_failed.add(source)
+                            if source not in failed_paths:
+                                failed_paths.append(source)
+                        source_pending[source] = max(0, source_pending.get(source, 1) - 1)
+                        if source_pending[source] == 0:
+                            final_status = "Error" if source in source_failed else "OK"
+                            self.after(0, lambda path=source, status=final_status: self._set_file_status(path, status))
+                            if source in actual_bytes_by_source:
+                                actual_text = f"{format_size(actual_bytes_by_source[source])} real"
+                                self.after(0, lambda path=source, text=actual_text: self._set_file_estimate(-1, path, text))
+                        elif source in source_failed:
+                            self.after(0, lambda path=source: self._set_file_status(path, "Error parcial"))
                         completed += 1
+                        elapsed = max(0.1, time.monotonic() - started_at)
+                        speed = completed / elapsed * 60
+                        remaining = (total_jobs - completed) / max(completed / elapsed, 0.001)
+                        self._set_status(
+                            f"Procesando {min(completed, total_jobs)}/{total_jobs}: {source.name} -> {output_format}"
+                        )
+                        self._set_throughput(f"{speed:.1f} img/min | ETA {format_duration(remaining)}")
                         self._set_progress(completed / total_jobs * 100)
                         if self.cancel_event.is_set():
                             for pending in future_map:
@@ -3076,11 +3709,14 @@ class ImageConverterApp(TkBase):
             append_log(f"Error general de conversion: {exc}")
         finally:
             self.after(0, lambda: self.convert_button.configure(state=tk.NORMAL))
+            self.after(0, lambda: self.pause_button.configure(state=tk.DISABLED, text="Pausar"))
             self.after(0, lambda: self.cancel_button.configure(state=tk.DISABLED))
+            self.after(0, lambda: self.retry_button.configure(state=tk.NORMAL))
+            self.after(0, lambda: self.repeat_button.configure(state=tk.NORMAL))
             self.after(0, lambda: setattr(self, "conversion_running", False))
 
         output_bytes = sum(output.stat().st_size for output in outputs if output.exists())
-        self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled, input_bytes, output_bytes))
+        self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled, input_bytes, output_bytes, failed_paths))
 
     def _finish_conversion(
         self,
@@ -3090,7 +3726,9 @@ class ImageConverterApp(TkBase):
         cancelled: bool = False,
         input_bytes: int = 0,
         output_bytes: int = 0,
+        failed_paths: list[Path] | None = None,
     ) -> None:
+        self.last_failed_files = list(dict.fromkeys(failed_paths or []))
         summary = format_conversion_summary(input_bytes, output_bytes)
         report_paths: tuple[Path, Path] | None = None
         try:
@@ -3119,16 +3757,19 @@ class ImageConverterApp(TkBase):
         if cancelled:
             self.status.set(f"Cancelado. Generados: {converted}. Errores: {len(errors)}. {summary}")
             self.batch_summary_info.set(f"Ahorro total: {summary}")
+            self.throughput_info.set("Conversion cancelada.")
             append_log(f"Conversion cancelada: generados={converted}, errores={len(errors)}, {summary}")
             messagebox.showinfo(APP_NAME, f"Conversion cancelada.\nArchivos generados: {converted}\n{summary}")
         elif errors:
             self.status.set(f"Generados: {converted}. Errores: {len(errors)}. {summary}")
             self.batch_summary_info.set(f"Ahorro total: {summary}")
+            self.throughput_info.set(f"Errores reintentables: {len(self.last_failed_files)}")
             append_log(f"Conversion terminada con errores: generados={converted}, errores={len(errors)}, {summary}")
             messagebox.showwarning(APP_NAME, "Algunas imagenes no se pudieron convertir:\n\n" + "\n".join(errors[:10]))
         else:
             self.status.set(f"Listo. Generados: {converted}. {summary}")
             self.batch_summary_info.set(f"Ahorro total: {summary}")
+            self.throughput_info.set("Conversion terminada sin errores.")
             append_log(f"Conversion terminada: generados={converted}, {summary}")
             messagebox.showinfo(APP_NAME, f"Conversion terminada.\nArchivos generados: {converted}\n{summary}")
         if not cancelled and outputs and self.open_output_when_done.get():
@@ -3140,8 +3781,13 @@ class ImageConverterApp(TkBase):
     def _set_progress(self, value: float) -> None:
         self.after(0, lambda: self.progress.set(value))
 
+    def _set_throughput(self, text: str) -> None:
+        self.after(0, lambda: self.throughput_info.set(text))
+
 
 if __name__ == "__main__":
+    if any(argument.startswith("--") for argument in sys.argv[1:]):
+        raise SystemExit(run_cli(sys.argv[1:]))
     app = ImageConverterApp()
     startup_paths = [Path(argument) for argument in sys.argv[1:] if argument.strip()]
     if startup_paths:
