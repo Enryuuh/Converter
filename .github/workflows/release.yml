@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build, for example 1.3.5"
+        description: "Version to build, for example 1.3.6"
         required: false
         type: string
 
@@ -98,6 +98,13 @@ jobs:
             - Converter.exe standalone executable
             - ConverterSetup.exe Windows installer
             - checksums-sha256.txt integrity hashes
+
+            Highlights:
+            - Per-file output size estimates in the queue
+            - Duplicate detection by file content
+            - Optional Windows context menu
+            - Import/export profiles
+            - Improved SVG output and preview comparison
           files: |
             dist/Converter.exe
             dist/ConverterSetup.exe

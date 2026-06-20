@@ -14,6 +14,8 @@ from app import (
     convert_image_optimized,
     describe_image,
     estimate_final_output_size,
+    file_signature,
+    format_estimate_cell,
     format_conversion_summary,
     format_output_estimate_summary,
     flatten_alpha,
@@ -178,6 +180,23 @@ class ConversionTests(unittest.TestCase):
         self.assertIn("PNG 2.4 KB", summary)
         self.assertIn("Total por foto 3.4 KB", summary)
 
+    def test_format_estimate_cell_reports_single_and_multiple_formats(self):
+        self.assertEqual(format_estimate_cell([("WEBP", 1024)]), "1.0 KB")
+        self.assertEqual(format_estimate_cell([("WEBP", 1024), ("JPG", 2048)]), "3.0 KB total")
+
+    def test_file_signature_matches_duplicate_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            first = folder / "first.png"
+            second = folder / "second.png"
+            third = folder / "third.png"
+            first.write_bytes(b"same image bytes")
+            second.write_bytes(b"same image bytes")
+            third.write_bytes(b"different image bytes")
+
+            self.assertEqual(file_signature(first), file_signature(second))
+            self.assertNotEqual(file_signature(first), file_signature(third))
+
     def test_estimate_final_output_size_returns_predicted_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "source.png"
@@ -328,6 +347,29 @@ class ConversionTests(unittest.TestCase):
             self.assertIsNone(options.target_size_kb)
         finally:
             app.destroy()
+
+    def test_file_tree_updates_status_and_estimate_columns_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            Image.new("RGB", (16, 16), "teal").save(source)
+            source = source.resolve()
+            app = ImageConverterApp()
+            try:
+                app.withdraw()
+                app.files = [source]
+                app.metadata_cache[source] = describe_image(source)
+                app.file_status[source] = "Pendiente"
+                app.file_estimates[source] = "Pendiente"
+                app._refresh_file_tree()
+
+                app._set_file_status(source, "OK")
+                app._set_file_estimate(app.file_estimate_request_id, source, "1.0 KB")
+
+                values = app.file_tree.item(str(source), "values")
+                self.assertEqual(values[1], "OK")
+                self.assertEqual(values[5], "1.0 KB")
+            finally:
+                app.destroy()
 
 
 if __name__ == "__main__":
