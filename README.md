@@ -64,15 +64,14 @@ El instalador queda en:
 dist\ConverterSetup.exe
 ```
 
-## Firma digital obligatoria para releases
+## Firma digital opcional
 
-El proyecto incluye `scripts\sign_windows.ps1`. Para publicar releases nuevos, el workflow exige firma digital.
-Define estos secrets en GitHub:
+El proyecto incluye `scripts\sign_windows.ps1`. Si defines estos secrets en GitHub, el workflow firma los binarios automaticamente:
 
 - `WINDOWS_CERTIFICATE_BASE64`: certificado PFX codificado en base64.
 - `WINDOWS_CERTIFICATE_PASSWORD`: clave del certificado.
 
-Si esos secrets no existen, el workflow falla antes de publicar el release. Esto evita subir binarios nuevos sin firma.
+Si esos secrets no existen, el workflow publica el release sin firma. En ese caso Windows puede mostrar una advertencia de "editor desconocido".
 
 ## Releases automaticos
 
