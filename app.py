@@ -36,7 +36,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -365,6 +365,8 @@ class ImageConverterApp(TkBase):
         self.preview_images: list[ImageTk.PhotoImage] = []
         self.cancel_event = threading.Event()
         self.profiles: dict[str, dict] = self._load_profiles()
+        self.history_entries: list[str] = []
+        self.conversion_running = False
 
         self.output_dir = tk.StringVar(value=str(Path.home() / "Pictures"))
         self.output_format = tk.StringVar(value="WEBP")
@@ -385,13 +387,36 @@ class ImageConverterApp(TkBase):
         self.target_size_kb = tk.StringVar(value="")
         self.max_workers = tk.IntVar(value=min(4, max(1, os.cpu_count() or 1)))
         self.profile_name = tk.StringVar(value="")
+        self.dark_mode = tk.BooleanVar(value=False)
         self.progress = tk.DoubleVar(value=0)
 
         self._build_ui()
         self._refresh_quality_state()
 
-    def _build_ui(self) -> None:
-        self.colors = {
+    def _theme_colors(self) -> dict[str, str]:
+        if self.dark_mode.get():
+            return {
+                "bg": "#0b1120",
+                "surface": "#111827",
+                "surface_soft": "#1f2937",
+                "line": "#334155",
+                "text": "#e5e7eb",
+                "muted": "#94a3b8",
+                "primary": "#60a5fa",
+                "primary_dark": "#3b82f6",
+                "success": "#2dd4bf",
+                "warning": "#fbbf24",
+                "drop": "#172554",
+                "drop_active": "#1e3a8a",
+                "tree_heading": "#1f2937",
+                "tree_selected": "#1d4ed8",
+                "badge_bg": "#1e40af",
+                "badge_fg": "#dbeafe",
+                "ghost": "#1f2937",
+                "ghost_active": "#334155",
+                "input": "#0f172a",
+            }
+        return {
             "bg": "#f6f8fb",
             "surface": "#ffffff",
             "surface_soft": "#f8fafc",
@@ -404,7 +429,17 @@ class ImageConverterApp(TkBase):
             "warning": "#f59e0b",
             "drop": "#eef6ff",
             "drop_active": "#dbeafe",
+            "tree_heading": "#edf2f7",
+            "tree_selected": "#dbeafe",
+            "badge_bg": "#dbeafe",
+            "badge_fg": "#2563eb",
+            "ghost": "#f1f5f9",
+            "ghost_active": "#e2e8f0",
+            "input": "#ffffff",
         }
+
+    def _build_ui(self) -> None:
+        self.colors = self._theme_colors()
         self.configure(background=self.colors["bg"])
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
@@ -416,18 +451,31 @@ class ImageConverterApp(TkBase):
         style.configure("Card.TLabel", background=self.colors["surface"], foreground=self.colors["text"], font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 9))
         style.configure("CardMuted.TLabel", background=self.colors["surface"], foreground=self.colors["muted"], font=("Segoe UI", 9))
-        style.configure("TCombobox", padding=6)
-        style.configure("TEntry", padding=6)
+        style.configure(
+            "TCombobox",
+            padding=6,
+            fieldbackground=self.colors["input"],
+            background=self.colors["input"],
+            foreground=self.colors["text"],
+            arrowcolor=self.colors["muted"],
+        )
+        style.configure(
+            "TEntry",
+            padding=6,
+            fieldbackground=self.colors["input"],
+            foreground=self.colors["text"],
+            insertcolor=self.colors["text"],
+        )
         style.configure("Treeview", rowheight=34, background=self.colors["surface"], fieldbackground=self.colors["surface"], borderwidth=0)
         style.configure(
             "Treeview.Heading",
             padding=(10, 10),
-            background="#edf2f7",
-            foreground="#334155",
+            background=self.colors["tree_heading"],
+            foreground=self.colors["text"],
             font=("Segoe UI", 9, "bold"),
         )
-        style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", self.colors["text"])])
-        style.configure("Horizontal.TProgressbar", troughcolor="#e5e7eb", background=self.colors["primary"], bordercolor="#e5e7eb")
+        style.map("Treeview", background=[("selected", self.colors["tree_selected"])], foreground=[("selected", self.colors["text"])])
+        style.configure("Horizontal.TProgressbar", troughcolor=self.colors["line"], background=self.colors["primary"], bordercolor=self.colors["line"])
 
         header = tk.Frame(self, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
         header.grid(row=0, column=0, sticky="ew")
@@ -448,8 +496,8 @@ class ImageConverterApp(TkBase):
         tk.Label(
             brand,
             text=f"v{APP_VERSION}",
-            bg="#dbeafe",
-            fg=self.colors["primary"],
+            bg=self.colors["badge_bg"],
+            fg=self.colors["badge_fg"],
             font=("Segoe UI", 9, "bold"),
             padx=8,
             pady=3,
@@ -466,7 +514,8 @@ class ImageConverterApp(TkBase):
         self._button(actions, "Agregar imagenes", self.add_files, "primary").grid(row=0, column=0, padx=(0, 8))
         self._button(actions, "Agregar carpeta", self.add_folder).grid(row=0, column=1, padx=(0, 8))
         self._button(actions, "Abrir salida", self.open_output_dir).grid(row=0, column=2, padx=(0, 8))
-        self._button(actions, "Actualizar", self.check_for_updates, "ghost").grid(row=0, column=3)
+        self._button(actions, "Actualizar", self.check_for_updates, "ghost").grid(row=0, column=3, padx=(0, 8))
+        self._button(actions, "Nocturno" if not self.dark_mode.get() else "Claro", self.toggle_theme, "ghost").grid(row=0, column=4)
 
         summary = tk.Frame(self, bg=self.colors["bg"])
         summary.grid(row=1, column=0, sticky="ew", padx=18, pady=(14, 10))
@@ -682,8 +731,9 @@ class ImageConverterApp(TkBase):
             to=max(1, min(16, os.cpu_count() or 1)),
             textvariable=self.max_workers,
             width=5,
-            bg=self.colors["surface"],
+            bg=self.colors["input"],
             fg=self.colors["text"],
+            buttonbackground=self.colors["ghost"],
             relief="solid",
             bd=1,
             font=("Segoe UI", 9),
@@ -727,7 +777,7 @@ class ImageConverterApp(TkBase):
         palette = {
             "primary": (self.colors["primary"], "#ffffff", self.colors["primary_dark"]),
             "secondary": (self.colors["surface_soft"], self.colors["text"], "#e2e8f0"),
-            "ghost": ("#f1f5f9", self.colors["text"], "#e2e8f0"),
+            "ghost": (self.colors["ghost"], self.colors["text"], self.colors["ghost_active"]),
         }
         bg, fg, active = palette[variant]
         return tk.Button(
@@ -784,6 +834,55 @@ class ImageConverterApp(TkBase):
     def _set_drop_active(self, active: bool) -> None:
         self.drop_zone.configure(bg=self.colors["drop_active"] if active else self.colors["drop"])
         self._draw_drop_zone()
+
+    def toggle_theme(self) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Espera a que termine la conversion o cancelala antes de cambiar el tema.")
+            return
+        selected = []
+        if hasattr(self, "file_tree"):
+            selected = [Path(item) for item in self.file_tree.selection()]
+        self.dark_mode.set(not self.dark_mode.get())
+        for child in self.winfo_children():
+            child.destroy()
+        self.logo_image = None
+        self.preview_image = None
+        self.preview_images = []
+        self._build_ui()
+        self._refresh_quality_state()
+        self._restore_file_tree(selected)
+        self._restore_history()
+        self.status.set("Modo nocturno activo." if self.dark_mode.get() else "Modo claro activo.")
+
+    def _restore_file_tree(self, selected: list[Path] | None = None) -> None:
+        selected = selected or []
+        for resolved in self.files:
+            metadata = self.metadata_cache.get(resolved)
+            if metadata is None:
+                metadata = describe_image(resolved)
+                self.metadata_cache[resolved] = metadata
+            image_format, dimensions, details, weight = metadata
+            self.file_tree.insert(
+                "",
+                tk.END,
+                iid=str(resolved),
+                values=(resolved.name, image_format, dimensions, weight, details, str(resolved.parent)),
+            )
+        valid_selection = [str(path) for path in selected if path in self.files]
+        if valid_selection:
+            self.file_tree.selection_set(valid_selection)
+            self.file_tree.focus(valid_selection[0])
+            self.update_preview()
+        elif self.files:
+            first = str(self.files[0])
+            self.file_tree.selection_set(first)
+            self.file_tree.focus(first)
+            self.update_preview()
+
+    def _restore_history(self) -> None:
+        for entry in self.history_entries:
+            self.history_list.insert(tk.END, entry)
+        self.history_list.yview_moveto(1)
 
     def add_files(self) -> None:
         paths = filedialog.askopenfilenames(title="Selecciona imagenes", filetypes=INPUT_FILE_TYPES)
@@ -1004,6 +1103,7 @@ class ImageConverterApp(TkBase):
             "target_size_enabled": self.target_size_enabled.get(),
             "target_size_kb": self.target_size_kb.get(),
             "max_workers": int(self.max_workers.get()),
+            "dark_mode": self.dark_mode.get(),
         }
 
     def save_current_profile(self) -> None:
@@ -1038,6 +1138,14 @@ class ImageConverterApp(TkBase):
         self.target_size_enabled.set(data.get("target_size_enabled", False))
         self.target_size_kb.set(data.get("target_size_kb", ""))
         self.max_workers.set(data.get("max_workers", min(4, max(1, os.cpu_count() or 1))))
+        requested_dark_mode = data.get("dark_mode", self.dark_mode.get())
+        if requested_dark_mode != self.dark_mode.get():
+            self.dark_mode.set(requested_dark_mode)
+            for child in self.winfo_children():
+                child.destroy()
+            self._build_ui()
+            self._restore_file_tree()
+            self._restore_history()
         self._refresh_quality_state()
         self.status.set(f"Perfil cargado: {name}")
 
@@ -1166,6 +1274,7 @@ class ImageConverterApp(TkBase):
 
         files = list(self.files)
         self.cancel_event.clear()
+        self.conversion_running = True
         self.convert_button.configure(state=tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL)
         self.progress.set(0)
@@ -1252,14 +1361,19 @@ class ImageConverterApp(TkBase):
         finally:
             self.after(0, lambda: self.convert_button.configure(state=tk.NORMAL))
             self.after(0, lambda: self.cancel_button.configure(state=tk.DISABLED))
+            self.after(0, lambda: setattr(self, "conversion_running", False))
 
         self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled))
 
     def _finish_conversion(self, converted: int, errors: list[str], outputs: list[Path], cancelled: bool = False) -> None:
         for output in outputs:
-            self.history_list.insert(tk.END, f"OK  {output.name} -> {output.parent}")
+            entry = f"OK  {output.name} -> {output.parent}"
+            self.history_entries.append(entry)
+            self.history_list.insert(tk.END, entry)
         for error in errors[:25]:
-            self.history_list.insert(tk.END, f"ERR {error}")
+            entry = f"ERR {error}"
+            self.history_entries.append(entry)
+            self.history_list.insert(tk.END, entry)
         self.history_list.yview_moveto(1)
 
         if cancelled:

@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$FilePath
+  [string]$FilePath,
+
+  [switch]$RequireSigning
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +12,9 @@ if (-not (Test-Path $FilePath)) {
 }
 
 if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+  if ($RequireSigning) {
+    throw "Signing is required, but WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not set."
+  }
   Write-Host "Skipping signing: WINDOWS_CERTIFICATE_BASE64 or WINDOWS_CERTIFICATE_PASSWORD is not set."
   exit 0
 }

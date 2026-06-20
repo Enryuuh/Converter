@@ -27,6 +27,7 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 - Opcion para sobrescribir o crear nombres nuevos automaticamente.
 - Boton para abrir la carpeta de salida.
 - Interfaz moderna con logo propio y nombre `Converter`.
+- Modo nocturno/claro con cambio desde la cabecera.
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
 - Carga de metadatos en segundo plano para no congelar la interfaz con carpetas grandes.
@@ -63,14 +64,15 @@ El instalador queda en:
 dist\ConverterSetup.exe
 ```
 
-## Firma digital opcional
+## Firma digital obligatoria para releases
 
-El proyecto incluye `scripts\sign_windows.ps1`. Para firmar en CI define estos secrets:
+El proyecto incluye `scripts\sign_windows.ps1`. Para publicar releases nuevos, el workflow exige firma digital.
+Define estos secrets en GitHub:
 
 - `WINDOWS_CERTIFICATE_BASE64`: certificado PFX codificado en base64.
 - `WINDOWS_CERTIFICATE_PASSWORD`: clave del certificado.
 
-Si esos secrets no existen, el workflow omite la firma sin fallar.
+Si esos secrets no existen, el workflow falla antes de publicar el release. Esto evita subir binarios nuevos sin firma.
 
 ## Releases automaticos
 

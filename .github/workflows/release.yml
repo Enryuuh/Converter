@@ -37,7 +37,7 @@ jobs:
         shell: pwsh
 
       - name: Sign executable if certificate is configured
-        run: .\scripts\sign_windows.ps1 -FilePath .\dist\Converter.exe
+        run: .\scripts\sign_windows.ps1 -FilePath .\dist\Converter.exe -RequireSigning
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
@@ -52,7 +52,7 @@ jobs:
         shell: pwsh
 
       - name: Sign installer if certificate is configured
-        run: .\scripts\sign_windows.ps1 -FilePath .\dist\ConverterSetup.exe
+        run: .\scripts\sign_windows.ps1 -FilePath .\dist\ConverterSetup.exe -RequireSigning
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
