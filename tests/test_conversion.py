@@ -3,13 +3,16 @@ import unittest
 from pathlib import Path
 
 from PIL import Image
+from PIL import ImageSequence
 
 from app import (
     ConversionOptions,
     build_output_path,
     combine_images_to_pdf,
     convert_image_optimized,
+    format_conversion_summary,
     flatten_alpha,
+    parse_output_formats,
     parse_version,
     resize_image,
 )
@@ -18,6 +21,7 @@ from app import (
 def make_options(**overrides):
     values = {
         "output_format": "WEBP",
+        "output_formats": ("WEBP",),
         "quality": 82,
         "output_dir": Path("."),
         "resize_enabled": False,
@@ -33,6 +37,8 @@ def make_options(**overrides):
         "target_size_enabled": False,
         "target_size_kb": None,
         "max_workers": 1,
+        "strip_metadata": True,
+        "open_output_when_done": False,
     }
     values.update(overrides)
     return ConversionOptions(**values)
@@ -71,6 +77,14 @@ class ConversionTests(unittest.TestCase):
 
     def test_parse_version_compares_semantic_versions(self):
         self.assertGreater(parse_version("v1.10.0"), parse_version("1.2.9"))
+
+    def test_parse_output_formats_deduplicates_and_validates(self):
+        self.assertEqual(parse_output_formats("WEBP", "png, jpg, WEBP"), ("WEBP", "PNG", "JPG"))
+        with self.assertRaises(ValueError):
+            parse_output_formats("WEBP", "not-real")
+
+    def test_format_conversion_summary_reports_savings(self):
+        self.assertIn("50.0% menos", format_conversion_summary(2000, 1000))
 
     def test_resize_keeps_aspect_ratio(self):
         image = Image.new("RGB", (200, 100), "blue")
@@ -127,6 +141,21 @@ class ConversionTests(unittest.TestCase):
 
             self.assertTrue(destination.exists())
             self.assertGreater(destination.stat().st_size, 0)
+
+    def test_animated_gif_preserves_frame_durations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            source = output_dir / "source.gif"
+            destination = output_dir / "out.gif"
+            frames = [Image.new("RGB", (16, 16), "red"), Image.new("RGB", (16, 16), "blue")]
+            frames[0].save(source, save_all=True, append_images=[frames[1]], duration=[40, 220], loop=0)
+            options = make_options(output_format="GIF", output_formats=("GIF",), output_dir=output_dir)
+
+            convert_image_optimized(source, destination, options)
+
+            with Image.open(destination) as image:
+                durations = [frame.info.get("duration") for frame in ImageSequence.Iterator(image)]
+            self.assertEqual(durations, [40, 220])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, for example 1.3.0"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -27,10 +32,27 @@ jobs:
 
       - name: Resolve version
         run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          if (-not $version) { $version = "1.1.0" }
+          $manualVersion = "${{ github.event.inputs.version }}"
+          $refName = "${{ github.ref_name }}"
+          if ($manualVersion) {
+            $version = $manualVersion.TrimStart("v")
+          } elseif ($refName.StartsWith("v")) {
+            $version = $refName.TrimStart("v")
+          } else {
+            $version = python -c "from app import APP_VERSION; print(APP_VERSION)"
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Invalid version: $version"
+          }
+          $appVersion = python -c "from app import APP_VERSION; print(APP_VERSION)"
+          if ($appVersion -ne $version) {
+            throw "APP_VERSION ($appVersion) does not match release version ($version)."
+          }
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append
         shell: pwsh
+
+      - name: Run tests
+        run: python -m unittest discover -s tests
 
       - name: Build executable
         run: .\build_exe.ps1
@@ -58,8 +80,11 @@ jobs:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
 
-      - name: Run tests
-        run: python -m unittest discover -s tests
+      - name: Generate checksums
+        run: |
+          Get-FileHash .\dist\Converter.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  Converter.exe" } | Set-Content .\dist\checksums-sha256.txt
+          Get-FileHash .\dist\ConverterSetup.exe -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  ConverterSetup.exe" } | Add-Content .\dist\checksums-sha256.txt
+        shell: pwsh
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -67,11 +92,13 @@ jobs:
         with:
           name: Converter ${{ github.ref_name }}
           body: |
-            Automated Windows release for Converter.
+            Windows release for Converter.
 
             Includes:
-            - Converter.exe portable executable
+            - Converter.exe standalone executable
             - ConverterSetup.exe Windows installer
+            - checksums-sha256.txt integrity hashes
           files: |
             dist/Converter.exe
             dist/ConverterSetup.exe
+            dist/checksums-sha256.txt

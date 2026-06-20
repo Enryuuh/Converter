@@ -5,11 +5,13 @@ import io
 import json
 import os
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
 import webbrowser
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, simpledialog
 import tkinter as tk
@@ -36,7 +38,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -45,6 +47,8 @@ LOGO_PNG = BASE_DIR / "assets" / "converter-logo.png"
 LOGO_ICO = BASE_DIR / "assets" / "converter-logo.ico"
 CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Converter"
 PROFILES_PATH = CONFIG_DIR / "profiles.json"
+SETTINGS_PATH = CONFIG_DIR / "settings.json"
+LOG_PATH = CONFIG_DIR / "converter.log"
 
 SUPPORTED_INPUT_EXTENSIONS = {
     ".jpg",
@@ -89,6 +93,7 @@ INPUT_FILE_TYPES = [
 @dataclass(frozen=True)
 class ConversionOptions:
     output_format: str
+    output_formats: tuple[str, ...]
     quality: int
     output_dir: Path
     resize_enabled: bool
@@ -104,6 +109,8 @@ class ConversionOptions:
     target_size_enabled: bool
     target_size_kb: int | None
     max_workers: int
+    strip_metadata: bool
+    open_output_when_done: bool
 
 
 def is_supported_image(path: Path) -> bool:
@@ -116,6 +123,44 @@ def parse_version(version: str) -> tuple[int, ...]:
         digits = "".join(char for char in part if char.isdigit())
         parts.append(int(digits or 0))
     return tuple(parts)
+
+
+def parse_output_formats(primary: str, extra_formats: str = "") -> tuple[str, ...]:
+    requested: list[str] = []
+    tokens = [primary, *extra_formats.replace(";", ",").replace("|", ",").split(",")]
+    for token in tokens:
+        value = token.strip().upper().lstrip(".")
+        if value == "JPG":
+            value = "JPG"
+        if not value:
+            continue
+        if value not in OUTPUT_FORMATS:
+            raise ValueError(f"Formato no soportado: {token.strip()}")
+        if value not in requested:
+            requested.append(value)
+    return tuple(requested or [primary.upper()])
+
+
+def format_conversion_summary(input_bytes: int, output_bytes: int) -> str:
+    if input_bytes <= 0 or output_bytes <= 0:
+        return f"Salida generada: {format_size(output_bytes)}"
+    difference = input_bytes - output_bytes
+    percent = abs(difference) / input_bytes * 100
+    if difference > 0:
+        return f"{format_size(input_bytes)} -> {format_size(output_bytes)} ({percent:.1f}% menos)"
+    if difference < 0:
+        return f"{format_size(input_bytes)} -> {format_size(output_bytes)} ({percent:.1f}% mas)"
+    return f"{format_size(input_bytes)} -> {format_size(output_bytes)} (sin cambio)"
+
+
+def append_log(message: str) -> None:
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"[{timestamp}] {message}\n")
+    except OSError:
+        pass
 
 
 def describe_image(path: Path) -> tuple[str, str, str, str]:
@@ -248,8 +293,21 @@ def prepared_frames_from_source(source: Path, options: ConversionOptions) -> tup
             "duration": image.info.get("duration", 100),
             "loop": image.info.get("loop", 0),
         }
+        if not options.strip_metadata and options.output_format in {"JPG", "JPEG", "WEBP", "TIFF"} and image.info.get("exif"):
+            source_info["exif"] = image.info["exif"]
         if preserve_frames:
-            frames = [prepare_frame(frame, options) for frame in ImageSequence.Iterator(image)]
+            durations: list[int] = []
+            disposals: list[int] = []
+            frames = []
+            for frame in ImageSequence.Iterator(image):
+                durations.append(int(frame.info.get("duration", image.info.get("duration", 100)) or 100))
+                if frame.info.get("disposal") is not None:
+                    disposals.append(int(frame.info["disposal"]))
+                frames.append(prepare_frame(frame, options))
+            if durations:
+                source_info["duration"] = durations
+            if len(disposals) == len(frames):
+                source_info["disposal"] = disposals
         else:
             oriented = ImageOps.exif_transpose(image)
             frames = [prepare_frame(oriented, options)]
@@ -274,6 +332,10 @@ def save_prepared_frames(
         if options.output_format in {"GIF", "WEBP"}:
             save_kwargs["duration"] = source_info.get("duration", 100)
             save_kwargs["loop"] = source_info.get("loop", 0)
+            if options.output_format == "GIF" and source_info.get("disposal"):
+                save_kwargs["disposal"] = source_info["disposal"]
+    if not options.strip_metadata and source_info.get("exif") and options.output_format in {"JPG", "JPEG", "WEBP", "TIFF"}:
+        save_kwargs["exif"] = source_info["exif"]
 
     first.save(destination, save_format, **save_kwargs)
     return destination
@@ -289,6 +351,15 @@ def estimate_output_size(source: Path, options: ConversionOptions) -> int:
     buffer = io.BytesIO()
     save_prepared_frames(frames, buffer, options, preserve_frames, source_info)
     return len(buffer.getvalue())
+
+
+def estimate_final_output_size(source: Path, options: ConversionOptions) -> int:
+    if options.target_size_enabled and options.target_size_kb and OUTPUT_FORMATS[options.output_format]["quality"]:
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp) / f"estimate{OUTPUT_FORMATS[options.output_format]['ext']}"
+            convert_image_optimized(source, destination, options)
+            return destination.stat().st_size
+    return estimate_output_size(source, options)
 
 
 def convert_image(source: Path, destination: Path, options: ConversionOptions, quality_override: int | None = None) -> Path:
@@ -363,6 +434,7 @@ class ImageConverterApp(TkBase):
         self.logo_image: ImageTk.PhotoImage | None = None
         self.preview_image: ImageTk.PhotoImage | None = None
         self.preview_images: list[ImageTk.PhotoImage] = []
+        self.preview_request_id = 0
         self.cancel_event = threading.Event()
         self.profiles: dict[str, dict] = self._load_profiles()
         self.history_entries: list[str] = []
@@ -370,6 +442,7 @@ class ImageConverterApp(TkBase):
 
         self.output_dir = tk.StringVar(value=str(Path.home() / "Pictures"))
         self.output_format = tk.StringVar(value="WEBP")
+        self.extra_formats = tk.StringVar(value="")
         self.quality = tk.IntVar(value=85)
         self.status = tk.StringVar(value="Listo para convertir. Agrega imagenes para empezar.")
         self.preview_info = tk.StringVar(value="Selecciona una imagen para ver detalles y vista previa.")
@@ -386,12 +459,16 @@ class ImageConverterApp(TkBase):
         self.target_size_enabled = tk.BooleanVar(value=False)
         self.target_size_kb = tk.StringVar(value="")
         self.max_workers = tk.IntVar(value=min(4, max(1, os.cpu_count() or 1)))
+        self.strip_metadata = tk.BooleanVar(value=True)
+        self.open_output_when_done = tk.BooleanVar(value=True)
         self.profile_name = tk.StringVar(value="")
         self.dark_mode = tk.BooleanVar(value=False)
         self.progress = tk.DoubleVar(value=0)
 
+        self._apply_settings(self._load_settings())
         self._build_ui()
         self._refresh_quality_state()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _theme_colors(self) -> dict[str, str]:
         if self.dark_mode.get():
@@ -591,8 +668,10 @@ class ImageConverterApp(TkBase):
         )
         queue_actions = tk.Frame(left_header, bg=self.colors["surface"])
         queue_actions.grid(row=0, column=1, sticky="e")
-        self._button(queue_actions, "Quitar", self.remove_selected, "ghost").grid(row=0, column=0, padx=(0, 8))
-        self._button(queue_actions, "Limpiar", self.clear_files, "ghost").grid(row=0, column=1)
+        self._button(queue_actions, "Subir", lambda: self.move_selected(-1), "ghost").grid(row=0, column=0, padx=(0, 8))
+        self._button(queue_actions, "Bajar", lambda: self.move_selected(1), "ghost").grid(row=0, column=1, padx=(0, 8))
+        self._button(queue_actions, "Quitar", self.remove_selected, "ghost").grid(row=0, column=2, padx=(0, 8))
+        self._button(queue_actions, "Limpiar", self.clear_files, "ghost").grid(row=0, column=3)
 
         self.drop_zone = tk.Canvas(left_panel, height=94, bg=self.colors["drop"], highlightthickness=0, bd=0)
         self.drop_zone.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
@@ -610,22 +689,27 @@ class ImageConverterApp(TkBase):
         table_frame.columnconfigure(0, weight=1)
         table_frame.rowconfigure(0, weight=1)
 
-        columns = ("name", "format", "dimensions", "weight", "details", "path")
+        columns = ("name", "status", "format", "dimensions", "weight", "details", "path")
         self.file_tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="extended")
         headings = {
             "name": "Archivo",
+            "status": "Estado",
             "format": "Tipo",
             "dimensions": "Tamano",
             "weight": "Peso",
             "details": "Detalle",
             "path": "Ruta",
         }
-        widths = {"name": 210, "format": 74, "dimensions": 96, "weight": 78, "details": 150, "path": 178}
+        widths = {"name": 190, "status": 92, "format": 70, "dimensions": 88, "weight": 74, "details": 130, "path": 150}
         for column, heading in headings.items():
             self.file_tree.heading(column, text=heading)
             self.file_tree.column(column, width=widths[column], minwidth=70, anchor="center" if column != "path" else "w")
         self.file_tree.grid(row=0, column=0, sticky="nsew")
         self.file_tree.bind("<<TreeviewSelect>>", self.update_preview)
+        if DND_AVAILABLE:
+            for target in (self, left_panel, table_frame, self.file_tree):
+                target.drop_target_register(DND_FILES)
+                target.dnd_bind("<<Drop>>", self.handle_drop)
         scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.file_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.file_tree.configure(yscrollcommand=scrollbar.set)
@@ -644,7 +728,8 @@ class ImageConverterApp(TkBase):
         tk.Label(preview_head, text="Vista previa", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self._button(preview_head, "Comparar salida", self.preview_output, "ghost").grid(row=0, column=1, sticky="e")
+        self._button(preview_head, "Comparar", self.preview_output, "ghost").grid(row=0, column=1, sticky="e", padx=(0, 8))
+        self._button(preview_head, "Estimar lote", self.estimate_batch_size, "ghost").grid(row=0, column=2, sticky="e")
         self.preview_canvas = tk.Canvas(preview_frame, height=240, bg=self.colors["surface_soft"], bd=0, highlightthickness=1, highlightbackground=self.colors["line"])
         self.preview_canvas.grid(row=1, column=0, sticky="ew", padx=16)
         tk.Label(
@@ -661,9 +746,15 @@ class ImageConverterApp(TkBase):
         history_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         history_frame.columnconfigure(0, weight=1)
         history_frame.rowconfigure(1, weight=1)
-        tk.Label(history_frame, text="Historial", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(14, 10)
+        history_head = tk.Frame(history_frame, bg=self.colors["surface"])
+        history_head.grid(row=0, column=0, columnspan=2, sticky="ew", padx=16, pady=(14, 10))
+        history_head.columnconfigure(0, weight=1)
+        tk.Label(history_head, text="Historial", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        self._button(history_head, "Exportar", self.export_history, "ghost").grid(row=0, column=1, sticky="e", padx=(0, 8))
+        self._button(history_head, "Limpiar", self.clear_history, "ghost").grid(row=0, column=2, sticky="e", padx=(0, 8))
+        self._button(history_head, "Log", self.open_log_file, "ghost").grid(row=0, column=3, sticky="e")
         self.history_list = tk.Listbox(
             history_frame,
             activestyle="none",
@@ -718,6 +809,8 @@ class ImageConverterApp(TkBase):
         self.quality_label.grid(row=1, column=6, sticky="w", pady=(0, 10))
 
         self._check(options, "PDF unico", self.combine_pdf).grid(row=1, column=7, sticky="w", padx=(14, 0), pady=(0, 10))
+        self._field_label(options, "Extra").grid(row=1, column=8, sticky="e", padx=(10, 8), pady=(0, 10))
+        ttk.Entry(options, textvariable=self.extra_formats, width=14).grid(row=1, column=9, sticky="ew", padx=(0, 16), pady=(0, 10))
 
         self._field_label(options, "Carpeta de salida").grid(row=2, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
         output_entry = ttk.Entry(options, textvariable=self.output_dir)
@@ -791,6 +884,8 @@ class ImageConverterApp(TkBase):
             bd=1,
             font=("Segoe UI", 9),
         ).grid(row=5, column=7, sticky="w", pady=(0, 16))
+        self._check(options, "Quitar metadatos", self.strip_metadata).grid(row=5, column=8, sticky="w", padx=(10, 8), pady=(0, 16))
+        self._check(options, "Abrir al terminar", self.open_output_when_done).grid(row=5, column=9, sticky="w", padx=(0, 16), pady=(0, 16))
 
         footer = tk.Frame(self, bg=self.colors["bg"])
         footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
@@ -804,6 +899,12 @@ class ImageConverterApp(TkBase):
         self.cancel_button = self._button(footer, "Cancelar", self.cancel_conversion, "ghost")
         self.cancel_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
         self.cancel_button.configure(state=tk.DISABLED)
+
+        self.bind_all("<Delete>", self._delete_shortcut)
+        self.bind_all("<Control-o>", lambda _event: self.add_files())
+        self.bind_all("<Control-Return>", lambda _event: self.start_conversion())
+        self.bind_all("<Escape>", lambda _event: self.cancel_conversion() if self.conversion_running else None)
+        self.bind_all("<Control-a>", self._select_all_files)
 
     def _card(self, parent) -> tk.Frame:
         return tk.Frame(parent, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
@@ -881,7 +982,7 @@ class ImageConverterApp(TkBase):
         self.drop_zone.delete("all")
         width = max(self.drop_zone.winfo_width(), 300)
         height = max(self.drop_zone.winfo_height(), 90)
-        self.drop_zone.create_rectangle(10, 10, width - 10, height - 10, outline="#93c5fd", width=2, dash=(8, 6))
+        self.drop_zone.create_rectangle(10, 10, width - 10, height - 10, outline=self.colors["primary"], width=2, dash=(8, 6))
         self.drop_zone.create_text(
             width // 2,
             height // 2 - 10,
@@ -922,6 +1023,8 @@ class ImageConverterApp(TkBase):
 
     def _restore_file_tree(self, selected: list[Path] | None = None) -> None:
         selected = selected or []
+        for item in self.file_tree.get_children():
+            self.file_tree.delete(item)
         for resolved in self.files:
             metadata = self.metadata_cache.get(resolved)
             if metadata is None:
@@ -932,7 +1035,7 @@ class ImageConverterApp(TkBase):
                 "",
                 tk.END,
                 iid=str(resolved),
-                values=(resolved.name, image_format, dimensions, weight, details, str(resolved.parent)),
+                values=(resolved.name, "Pendiente", image_format, dimensions, weight, details, str(resolved.parent)),
             )
         valid_selection = [str(path) for path in selected if path in self.files]
         if valid_selection:
@@ -1025,7 +1128,7 @@ class ImageConverterApp(TkBase):
                 "",
                 tk.END,
                 iid=str(resolved),
-                values=(resolved.name, image_format, dimensions, weight, details, str(resolved.parent)),
+                values=(resolved.name, "Pendiente", image_format, dimensions, weight, details, str(resolved.parent)),
             )
 
         self.status.set(f"{len(self.files)} imagen(es) listas. Agregadas: {added}. Rechazadas: {rejected}.")
@@ -1036,6 +1139,9 @@ class ImageConverterApp(TkBase):
             self.update_preview()
 
     def remove_selected(self) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Espera a que termine la conversion antes de modificar la cola.")
+            return
         selected = list(self.file_tree.selection())
         selected_paths = {Path(item) for item in selected}
         for item in selected:
@@ -1046,12 +1152,96 @@ class ImageConverterApp(TkBase):
         self.status.set(f"{len(self.files)} imagen(es) listas.")
 
     def clear_files(self) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Espera a que termine la conversion antes de limpiar la cola.")
+            return
         self.files.clear()
         for item in self.file_tree.get_children():
             self.file_tree.delete(item)
         self.preview_canvas.delete("all")
         self.preview_info.set("Selecciona una imagen para ver la vista previa.")
         self.status.set("Lista limpia.")
+
+    def _focus_is_text_input(self) -> bool:
+        focus = self.focus_get()
+        return bool(focus and focus.winfo_class() in {"Entry", "TEntry", "Spinbox", "TSpinbox", "Text"})
+
+    def _delete_shortcut(self, _event=None):
+        if self._focus_is_text_input():
+            return None
+        self.remove_selected()
+        return "break"
+
+    def _select_all_files(self, _event=None):
+        if self._focus_is_text_input():
+            return None
+        if hasattr(self, "file_tree"):
+            self.file_tree.selection_set(self.file_tree.get_children())
+        return "break"
+
+    def move_selected(self, direction: int) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Espera a que termine la conversion antes de reordenar.")
+            return
+        selected = [Path(item) for item in self.file_tree.selection()]
+        if not selected:
+            return
+        ordered = list(self.files)
+        if direction > 0:
+            indexes = range(len(ordered) - 2, -1, -1)
+        else:
+            indexes = range(1, len(ordered))
+        selected_set = set(selected)
+        for index in indexes:
+            swap_with = index + direction
+            if ordered[index] in selected_set and ordered[swap_with] not in selected_set:
+                ordered[index], ordered[swap_with] = ordered[swap_with], ordered[index]
+        self.files = ordered
+        self._restore_file_tree(selected)
+        self.status.set("Orden de cola actualizado.")
+
+    def _set_file_status(self, path: Path, status: str) -> None:
+        item = str(path)
+        if hasattr(self, "file_tree") and self.file_tree.exists(item):
+            values = list(self.file_tree.item(item, "values"))
+            if len(values) >= 2:
+                values[1] = status
+                self.file_tree.item(item, values=values)
+
+    def _reset_file_statuses(self) -> None:
+        for path in self.files:
+            self._set_file_status(path, "Pendiente")
+
+    def export_history(self) -> None:
+        if not self.history_entries:
+            messagebox.showinfo(APP_NAME, "No hay historial para exportar.")
+            return
+        destination = filedialog.asksaveasfilename(
+            title="Exportar historial",
+            defaultextension=".txt",
+            filetypes=[("Texto", "*.txt"), ("Todos los archivos", "*.*")],
+        )
+        if not destination:
+            return
+        try:
+            Path(destination).write_text("\n".join(self.history_entries) + "\n", encoding="utf-8")
+            self.status.set(f"Historial exportado: {destination}")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo exportar el historial:\n{exc}")
+
+    def clear_history(self) -> None:
+        self.history_entries.clear()
+        if hasattr(self, "history_list"):
+            self.history_list.delete(0, tk.END)
+        self.status.set("Historial limpio.")
+
+    def open_log_file(self) -> None:
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            LOG_PATH.touch(exist_ok=True)
+            os.startfile(LOG_PATH)
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo abrir el log:\n{exc}")
 
     def update_preview(self, _event=None) -> None:
         selected = self.file_tree.selection()
@@ -1106,6 +1296,13 @@ class ImageConverterApp(TkBase):
             return
 
         path = Path(selected[0])
+        self.preview_request_id += 1
+        request_id = self.preview_request_id
+        self.preview_info.set("Generando comparacion...")
+        thread = threading.Thread(target=self._preview_output_worker, args=(request_id, path, options), daemon=True)
+        thread.start()
+
+    def _preview_output_worker(self, request_id: int, path: Path, options: ConversionOptions) -> None:
         try:
             with Image.open(path) as image:
                 image.draft("RGB", (190, 190))
@@ -1114,31 +1311,164 @@ class ImageConverterApp(TkBase):
                 original = original.convert("RGBA")
             output = converted_first_frame(path, options).convert("RGBA")
             output.thumbnail((190, 190), Image.Resampling.LANCZOS)
-
-            original_photo = ImageTk.PhotoImage(original)
-            output_photo = ImageTk.PhotoImage(output)
-            self.preview_images = [original_photo, output_photo]
-
-            self.preview_canvas.delete("all")
-            width = self.preview_canvas.winfo_width() or 410
-            left_x = width // 4
-            right_x = width * 3 // 4
-            self.preview_canvas.create_text(left_x, 18, text="Original", fill=self.colors["muted"], font=("Segoe UI", 9, "bold"))
-            self.preview_canvas.create_text(right_x, 18, text="Salida", fill=self.colors["primary"], font=("Segoe UI", 9, "bold"))
-            self.preview_canvas.create_image(left_x, 122, image=original_photo, anchor="center")
-            self.preview_canvas.create_image(right_x, 122, image=output_photo, anchor="center")
-
             original_size = path.stat().st_size
-            estimated_size = estimate_output_size(path, options)
-            self.preview_info.set(
-                f"{path.name} | original {format_size(original_size)} | estimado {format_size(estimated_size)} | {options.output_format}"
-            )
+            estimated_size = estimate_final_output_size(path, options)
+            self.after(0, lambda: self._finish_preview_output(request_id, path, original, output, original_size, estimated_size, options.output_format))
         except Exception as exc:
-            messagebox.showerror(APP_NAME, f"No se pudo generar la comparacion:\n{exc}")
+            error = str(exc)
+            self.after(0, lambda: messagebox.showerror(APP_NAME, f"No se pudo generar la comparacion:\n{error}"))
+            self._set_status("No se pudo generar la comparacion.")
+
+    def _finish_preview_output(
+        self,
+        request_id: int,
+        path: Path,
+        original: Image.Image,
+        output: Image.Image,
+        original_size: int,
+        estimated_size: int,
+        output_format: str,
+    ) -> None:
+        if request_id != self.preview_request_id:
+            return
+        if not self.file_tree.selection() or Path(self.file_tree.selection()[0]) != path:
+            return
+
+        original_photo = ImageTk.PhotoImage(original)
+        output_photo = ImageTk.PhotoImage(output)
+        self.preview_images = [original_photo, output_photo]
+
+        self.preview_canvas.delete("all")
+        width = self.preview_canvas.winfo_width() or 410
+        left_x = width // 4
+        right_x = width * 3 // 4
+        self.preview_canvas.create_text(left_x, 18, text="Original", fill=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+        self.preview_canvas.create_text(right_x, 18, text="Salida", fill=self.colors["primary"], font=("Segoe UI", 9, "bold"))
+        self.preview_canvas.create_image(left_x, 122, image=original_photo, anchor="center")
+        self.preview_canvas.create_image(right_x, 122, image=output_photo, anchor="center")
+        self.preview_info.set(f"{path.name} | {format_conversion_summary(original_size, estimated_size)} | {output_format}")
+
+    def estimate_batch_size(self) -> None:
+        if self.conversion_running:
+            messagebox.showinfo(APP_NAME, "Espera a que termine la conversion antes de estimar.")
+            return
+        if not self.files:
+            messagebox.showinfo(APP_NAME, "Agrega imagenes para estimar el lote.")
+            return
+        options = self._read_options()
+        if options is None:
+            return
+        files = list(self.files)
+        self.status.set("Estimando peso de salida...")
+        self.progress.set(0)
+        thread = threading.Thread(target=self._estimate_batch_worker, args=(files, options), daemon=True)
+        thread.start()
+
+    def _estimate_batch_worker(self, files: list[Path], options: ConversionOptions) -> None:
+        input_bytes = sum(path.stat().st_size for path in files if path.exists())
+        output_bytes = 0
+        errors: list[str] = []
+        formats = list(options.output_formats)
+        total_jobs = len(files) * len(formats)
+        completed = 0
+
+        try:
+            if options.combine_pdf and "PDF" in formats:
+                with tempfile.TemporaryDirectory() as tmp:
+                    destination = Path(tmp) / "estimate.pdf"
+                    combine_images_to_pdf(files, destination, replace(options, output_format="PDF", output_formats=("PDF",)))
+                    output_bytes += destination.stat().st_size
+                completed += len(files)
+                formats = [fmt for fmt in formats if fmt != "PDF"]
+                total_jobs = max(1, len(files) * len(formats) + completed)
+                self._set_progress(completed / total_jobs * 100)
+
+            for source in files:
+                for output_format in formats:
+                    try:
+                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                        output_bytes += estimate_final_output_size(source, format_options)
+                    except Exception as exc:
+                        errors.append(f"{source.name} ({output_format}): {exc}")
+                    completed += 1
+                    if total_jobs:
+                        self._set_progress(completed / total_jobs * 100)
+        except Exception as exc:
+            errors.append(str(exc))
+
+        summary = format_conversion_summary(input_bytes, output_bytes)
+
+        def notify() -> None:
+            self.progress.set(0)
+            if errors:
+                self.status.set(f"Estimacion lista con {len(errors)} error(es). {summary}")
+                messagebox.showwarning(APP_NAME, "Estimacion terminada con errores:\n\n" + "\n".join(errors[:10]))
+            else:
+                self.status.set(f"Estimacion lista. {summary}")
+                messagebox.showinfo(APP_NAME, f"Estimacion del lote:\n{summary}")
+
+        self.after(0, notify)
 
     def cancel_conversion(self) -> None:
         self.cancel_event.set()
         self.status.set("Cancelando conversion...")
+
+    def _load_settings(self) -> dict:
+        try:
+            if SETTINGS_PATH.exists():
+                payload = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                return payload if isinstance(payload, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            append_log("No se pudo cargar settings.json")
+        return {}
+
+    def _write_json_atomic(self, path: Path, payload: dict) -> None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+    def _apply_settings(self, data: dict) -> None:
+        if not data:
+            return
+        self.output_dir.set(data.get("output_dir", self.output_dir.get()))
+        self.output_format.set(data.get("output_format", self.output_format.get()))
+        self.extra_formats.set(data.get("extra_formats", self.extra_formats.get()))
+        self.quality.set(data.get("quality", self.quality.get()))
+        self.resize_enabled.set(data.get("resize_enabled", self.resize_enabled.get()))
+        self.resize_width.set(data.get("resize_width", self.resize_width.get()))
+        self.resize_height.set(data.get("resize_height", self.resize_height.get()))
+        self.keep_aspect.set(data.get("keep_aspect", self.keep_aspect.get()))
+        self.background_hex.set(data.get("background_hex", self.background_hex.get()))
+        self.naming_mode.set(data.get("naming_mode", self.naming_mode.get()))
+        self.prefix.set(data.get("prefix", self.prefix.get()))
+        self.suffix.set(data.get("suffix", self.suffix.get()))
+        self.overwrite.set(data.get("overwrite", self.overwrite.get()))
+        self.combine_pdf.set(data.get("combine_pdf", self.combine_pdf.get()))
+        self.target_size_enabled.set(data.get("target_size_enabled", self.target_size_enabled.get()))
+        self.target_size_kb.set(data.get("target_size_kb", self.target_size_kb.get()))
+        self.max_workers.set(data.get("max_workers", self.max_workers.get()))
+        self.strip_metadata.set(data.get("strip_metadata", self.strip_metadata.get()))
+        self.open_output_when_done.set(data.get("open_output_when_done", self.open_output_when_done.get()))
+        self.dark_mode.set(data.get("dark_mode", self.dark_mode.get()))
+
+    def _save_settings(self) -> None:
+        payload = {
+            "schemaVersion": 1,
+            "output_dir": self.output_dir.get(),
+            **self._current_profile_data(),
+            "extra_formats": self.extra_formats.get(),
+            "strip_metadata": self.strip_metadata.get(),
+            "open_output_when_done": self.open_output_when_done.get(),
+        }
+        try:
+            self._write_json_atomic(SETTINGS_PATH, payload)
+        except OSError as exc:
+            append_log(f"No se pudo guardar settings.json: {exc}")
+
+    def _on_close(self) -> None:
+        self._save_settings()
+        self.destroy()
 
     def _load_profiles(self) -> dict[str, dict]:
         try:
@@ -1149,12 +1479,12 @@ class ImageConverterApp(TkBase):
         return {}
 
     def _save_profiles(self) -> None:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        PROFILES_PATH.write_text(json.dumps(self.profiles, indent=2), encoding="utf-8")
+        self._write_json_atomic(PROFILES_PATH, self.profiles)
 
     def _current_profile_data(self) -> dict:
         return {
             "output_format": self.output_format.get(),
+            "extra_formats": self.extra_formats.get(),
             "quality": int(self.quality.get()),
             "resize_enabled": self.resize_enabled.get(),
             "resize_width": self.resize_width.get(),
@@ -1169,6 +1499,8 @@ class ImageConverterApp(TkBase):
             "target_size_enabled": self.target_size_enabled.get(),
             "target_size_kb": self.target_size_kb.get(),
             "max_workers": int(self.max_workers.get()),
+            "strip_metadata": self.strip_metadata.get(),
+            "open_output_when_done": self.open_output_when_done.get(),
             "dark_mode": self.dark_mode.get(),
         }
 
@@ -1189,6 +1521,7 @@ class ImageConverterApp(TkBase):
             messagebox.showinfo(APP_NAME, "Selecciona un perfil guardado.")
             return
         self.output_format.set(data.get("output_format", "WEBP"))
+        self.extra_formats.set(data.get("extra_formats", ""))
         self.quality.set(data.get("quality", 85))
         self.resize_enabled.set(data.get("resize_enabled", False))
         self.resize_width.set(data.get("resize_width", ""))
@@ -1204,6 +1537,8 @@ class ImageConverterApp(TkBase):
         self.target_size_enabled.set(data.get("target_size_enabled", False))
         self.target_size_kb.set(data.get("target_size_kb", ""))
         self.max_workers.set(data.get("max_workers", min(4, max(1, os.cpu_count() or 1))))
+        self.strip_metadata.set(data.get("strip_metadata", True))
+        self.open_output_when_done.set(data.get("open_output_when_done", True))
         requested_dark_mode = data.get("dark_mode", self.dark_mode.get())
         if requested_dark_mode != self.dark_mode.get():
             self.dark_mode.set(requested_dark_mode)
@@ -1245,6 +1580,7 @@ class ImageConverterApp(TkBase):
 
     def apply_preset(self, _event=None) -> None:
         preset = self.preset_combo.get()
+        self.extra_formats.set("")
         if preset == "Para web":
             self.output_format.set("WEBP")
             self.quality.set(82)
@@ -1289,6 +1625,9 @@ class ImageConverterApp(TkBase):
 
     def _read_options(self) -> ConversionOptions | None:
         try:
+            output_formats = parse_output_formats(self.output_format.get(), self.extra_formats.get())
+            if self.combine_pdf.get() and "PDF" not in output_formats:
+                output_formats = ("PDF", *output_formats)
             background = ImageColor.getrgb(self.background_hex.get())
             width = int(self.resize_width.get()) if self.resize_width.get().strip() else None
             height = int(self.resize_height.get()) if self.resize_height.get().strip() else None
@@ -1306,6 +1645,7 @@ class ImageConverterApp(TkBase):
 
         return ConversionOptions(
             output_format=self.output_format.get(),
+            output_formats=output_formats,
             quality=int(self.quality.get()),
             output_dir=Path(self.output_dir.get()).expanduser(),
             resize_enabled=self.resize_enabled.get(),
@@ -1321,6 +1661,8 @@ class ImageConverterApp(TkBase):
             target_size_enabled=self.target_size_enabled.get(),
             target_size_kb=target_size,
             max_workers=max(1, max_workers),
+            strip_metadata=self.strip_metadata.get(),
+            open_output_when_done=self.open_output_when_done.get(),
         )
 
     def start_conversion(self) -> None:
@@ -1339,6 +1681,7 @@ class ImageConverterApp(TkBase):
             return
 
         files = list(self.files)
+        self._save_settings()
         self.cancel_event.clear()
         self.conversion_running = True
         self.convert_button.configure(state=tk.DISABLED)
@@ -1352,49 +1695,80 @@ class ImageConverterApp(TkBase):
         errors: list[str] = []
         outputs: list[Path] = []
         cancelled = False
+        input_bytes = sum(path.stat().st_size for path in files if path.exists())
+        self.after(0, self._reset_file_statuses)
 
         try:
-            if options.combine_pdf and options.output_format == "PDF":
+            formats = list(options.output_formats)
+            total_jobs = max(1, len(files) * len(formats))
+            completed = 0
+            reserved_outputs: set[Path] = set()
+
+            if options.combine_pdf and "PDF" in formats:
                 destination = options.output_dir / "imagenes_convertidas.pdf"
                 if not options.overwrite:
                     counter = 1
-                    while destination.exists():
+                    while destination.exists() or destination in reserved_outputs:
                         destination = options.output_dir / f"imagenes_convertidas_{counter}.pdf"
                         counter += 1
+                reserved_outputs.add(destination)
                 self._set_status("Creando PDF unico...")
+                for source in files:
+                    self.after(0, lambda path=source: self._set_file_status(path, "PDF"))
                 if self.cancel_event.is_set():
                     cancelled = True
                 else:
-                    combine_images_to_pdf(files, destination, options)
-                    outputs.append(destination)
-                    converted = len(files)
-                self._set_progress(100)
-            else:
-                total = len(files)
-                completed = 0
-                reserved_outputs: set[Path] = set()
-                job_iter = iter(enumerate(files, start=1))
+                    try:
+                        pdf_options = replace(options, output_format="PDF", output_formats=("PDF",))
+                        combine_images_to_pdf(files, destination, pdf_options)
+                        outputs.append(destination)
+                        converted += 1
+                        for source in files:
+                            self.after(0, lambda path=source: self._set_file_status(path, "PDF OK"))
+                    except (OSError, UnidentifiedImageError, ValueError) as exc:
+                        errors.append(f"PDF unico: {exc}")
+                completed += 1
+                total_jobs = max(1, len(files) * (len(formats) - 1) + 1)
+                self._set_progress(completed / total_jobs * 100)
+                formats = [fmt for fmt in formats if fmt != "PDF"]
 
-                def convert_one(index: int, source: Path, destination: Path) -> tuple[bool, Path | None, str | None]:
+            if formats and not cancelled:
+                job_iter = iter((index, source, output_format) for index, source in enumerate(files, start=1) for output_format in formats)
+
+                def convert_one(index: int, source: Path, output_format: str, destination: Path) -> tuple[bool, Path | None, str | None]:
                     if self.cancel_event.is_set():
                         return False, None, None
+                    self.after(0, lambda path=source, fmt=output_format: self._set_file_status(path, f"{fmt}..."))
                     try:
-                        convert_image_optimized(source, destination, options)
-                        return True, destination, None
+                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                        convert_image_optimized(source, destination, format_options)
+                        warning = None
+                        if (
+                            format_options.target_size_enabled
+                            and format_options.target_size_kb
+                            and OUTPUT_FORMATS[output_format]["quality"]
+                            and destination.stat().st_size > format_options.target_size_kb * 1024
+                        ):
+                            warning = (
+                                f"{source.name} ({output_format}): objetivo {format_options.target_size_kb} KB no alcanzable, "
+                                f"salida {format_size(destination.stat().st_size)}"
+                            )
+                        return True, destination, warning
                     except (OSError, UnidentifiedImageError, ValueError) as exc:
-                        return False, None, f"{source.name}: {exc}"
+                        return False, None, f"{source.name} ({output_format}): {exc}"
 
-                max_workers = min(options.max_workers, total)
+                max_workers = min(options.max_workers, max(1, len(files) * len(formats)))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_map: dict[concurrent.futures.Future, tuple[int, Path]] = {}
+                    future_map: dict[concurrent.futures.Future, tuple[int, Path, str]] = {}
 
                     def submit_next() -> bool:
                         try:
-                            index, source = next(job_iter)
+                            index, source, output_format = next(job_iter)
                         except StopIteration:
                             return False
-                        destination = build_output_path(source, options.output_dir, options, index, reserved_outputs)
-                        future_map[executor.submit(convert_one, index, source, destination)] = (index, source)
+                        format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                        destination = build_output_path(source, options.output_dir, format_options, index, reserved_outputs)
+                        future_map[executor.submit(convert_one, index, source, output_format, destination)] = (index, source, output_format)
                         return True
 
                     for _ in range(max_workers):
@@ -1406,32 +1780,51 @@ class ImageConverterApp(TkBase):
                             return_when=concurrent.futures.FIRST_COMPLETED,
                         )
                         future = done.pop()
-                        index, source = future_map.pop(future)
+                        _index, source, output_format = future_map.pop(future)
                         if self.cancel_event.is_set():
                             cancelled = True
-                        self._set_status(f"Procesando {min(completed + 1, total)}/{total}: {source.name}")
+                        self._set_status(f"Procesando {min(completed + 1, total_jobs)}/{total_jobs}: {source.name} -> {output_format}")
                         ok, output, error = future.result()
                         if ok and output is not None:
                             outputs.append(output)
                             converted += 1
+                            self.after(0, lambda path=source: self._set_file_status(path, "OK"))
                         if error:
                             errors.append(error)
+                            if not ok:
+                                self.after(0, lambda path=source: self._set_file_status(path, "Error"))
                         completed += 1
-                        self._set_progress(completed / total * 100)
+                        self._set_progress(completed / total_jobs * 100)
                         if self.cancel_event.is_set():
                             for pending in future_map:
                                 pending.cancel()
                             cancelled = True
                             break
                         submit_next()
+            if cancelled:
+                for source in files:
+                    self.after(0, lambda path=source: self._set_file_status(path, "Cancelado"))
+        except Exception as exc:
+            errors.append(str(exc))
+            append_log(f"Error general de conversion: {exc}")
         finally:
             self.after(0, lambda: self.convert_button.configure(state=tk.NORMAL))
             self.after(0, lambda: self.cancel_button.configure(state=tk.DISABLED))
             self.after(0, lambda: setattr(self, "conversion_running", False))
 
-        self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled))
+        output_bytes = sum(output.stat().st_size for output in outputs if output.exists())
+        self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled, input_bytes, output_bytes))
 
-    def _finish_conversion(self, converted: int, errors: list[str], outputs: list[Path], cancelled: bool = False) -> None:
+    def _finish_conversion(
+        self,
+        converted: int,
+        errors: list[str],
+        outputs: list[Path],
+        cancelled: bool = False,
+        input_bytes: int = 0,
+        output_bytes: int = 0,
+    ) -> None:
+        summary = format_conversion_summary(input_bytes, output_bytes)
         for output in outputs:
             entry = f"OK  {output.name} -> {output.parent}"
             self.history_entries.append(entry)
@@ -1440,17 +1833,21 @@ class ImageConverterApp(TkBase):
             entry = f"ERR {error}"
             self.history_entries.append(entry)
             self.history_list.insert(tk.END, entry)
+            append_log(entry)
         self.history_list.yview_moveto(1)
+        self._save_settings()
 
         if cancelled:
-            self.status.set(f"Cancelado. Convertidas: {converted}. Errores: {len(errors)}.")
-            messagebox.showinfo(APP_NAME, f"Conversion cancelada.\nImagenes convertidas: {converted}")
+            self.status.set(f"Cancelado. Generados: {converted}. Errores: {len(errors)}. {summary}")
+            messagebox.showinfo(APP_NAME, f"Conversion cancelada.\nArchivos generados: {converted}\n{summary}")
         elif errors:
-            self.status.set(f"Convertidas: {converted}. Errores: {len(errors)}.")
+            self.status.set(f"Generados: {converted}. Errores: {len(errors)}. {summary}")
             messagebox.showwarning(APP_NAME, "Algunas imagenes no se pudieron convertir:\n\n" + "\n".join(errors[:10]))
         else:
-            self.status.set(f"Listo. Convertidas: {converted}.")
-            messagebox.showinfo(APP_NAME, f"Conversion terminada.\nImagenes convertidas: {converted}")
+            self.status.set(f"Listo. Generados: {converted}. {summary}")
+            messagebox.showinfo(APP_NAME, f"Conversion terminada.\nArchivos generados: {converted}\n{summary}")
+        if not cancelled and outputs and self.open_output_when_done.get():
+            self.open_output_dir()
 
     def _set_status(self, text: str) -> None:
         self.after(0, lambda: self.status.set(text))

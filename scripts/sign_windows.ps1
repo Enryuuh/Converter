@@ -19,8 +19,7 @@ if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSW
   exit 0
 }
 
-$certificatePath = Join-Path $env:TEMP "converter-signing.pfx"
-[IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+$certificatePath = Join-Path $env:TEMP ("converter-signing-{0}.pfx" -f ([Guid]::NewGuid().ToString("N")))
 
 $signtool = Get-Command signtool -ErrorAction SilentlyContinue
 if (-not $signtool) {
@@ -34,12 +33,19 @@ if (-not $signtool) {
   throw "signtool.exe was not found."
 }
 
-& $signtool.Source sign `
-  /fd SHA256 `
-  /td SHA256 `
-  /tr http://timestamp.digicert.com `
-  /f $certificatePath `
-  /p $env:WINDOWS_CERTIFICATE_PASSWORD `
-  $FilePath
+try {
+  [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
 
-Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+  & $signtool.Source sign `
+    /fd SHA256 `
+    /td SHA256 `
+    /tr http://timestamp.digicert.com `
+    /f $certificatePath `
+    /p $env:WINDOWS_CERTIFICATE_PASSWORD `
+    $FilePath
+
+  & $signtool.Source verify /pa /v $FilePath
+}
+finally {
+  Remove-Item -LiteralPath $certificatePath -Force -ErrorAction SilentlyContinue
+}

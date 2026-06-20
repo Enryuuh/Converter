@@ -17,6 +17,7 @@ if (-not (Test-Path $pythonExe)) {
   --windowed `
   --collect-data tkinterdnd2 `
   --add-data "assets\converter-logo.png;assets" `
+  --add-data "assets\converter-logo.ico;assets" `
   --icon "assets\converter-logo.ico" `
   --name "Converter" `
   app.py

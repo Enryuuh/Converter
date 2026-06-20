@@ -12,17 +12,26 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 
 - Vista previa de la imagen seleccionada.
 - Comparacion antes/despues con peso estimado de salida.
+- Estimacion de peso para todo el lote antes de convertir.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
+- Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
+- Reordenar la cola con botones para subir y bajar imagenes.
 - Barra de progreso y estado por archivo.
 - Conversion paralela configurable.
+- Conversion a varios formatos en una sola corrida usando `Formatos extra`.
 - Cancelacion de conversion en curso.
-- Historial de conversiones y errores.
+- Historial de conversiones y errores con exportacion a TXT.
 - Redimensionado con o sin proporcion.
 - Compresion por peso objetivo en KB para formatos con calidad configurable.
+- Aviso cuando el peso objetivo no se puede alcanzar sin cambiar dimensiones/formato.
 - Fondo configurable para formatos sin transparencia como JPG, BMP y PDF.
+- Opcion para quitar o conservar metadatos EXIF cuando el formato lo soporta.
+- Apertura automatica de la carpeta de salida al terminar.
 - Presets: web, maxima calidad, reducir peso, icono ICO y PDF desde imagenes.
 - Perfiles personalizados guardados en el equipo.
+- Ajustes guardados automaticamente en `%APPDATA%\Converter\settings.json`.
+- Logs persistentes en `%APPDATA%\Converter\converter.log`.
 - Renombrado por lote: conservar, numerar o prefijo/sufijo.
 - Opcion para sobrescribir o crear nombres nuevos automaticamente.
 - Boton para abrir la carpeta de salida.
@@ -49,6 +58,7 @@ dist\Converter.exe
 ```
 
 El build usa un entorno virtual local `.venv-build` para generar un binario mas limpio y consistente.
+Para publicar una version se recomienda usar el workflow de GitHub, porque tambien genera instalador y checksums SHA256.
 
 ## Crear instalador
 
@@ -78,9 +88,11 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
+
+Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
 
 ## Ejecutar sin compilar
 
