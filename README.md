@@ -28,7 +28,7 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 - Fondo configurable para formatos sin transparencia como JPG, BMP y PDF.
 - Opcion para quitar o conservar metadatos EXIF cuando el formato lo soporta.
 - Apertura automatica de la carpeta de salida al terminar.
-- Presets: web, maxima calidad, reducir peso, icono ICO y PDF desde imagenes.
+- Ajustes rapidos: web, maxima calidad, reducir peso, icono ICO y PDF desde imagenes.
 - Perfiles personalizados guardados en el equipo.
 - Ajustes guardados automaticamente en `%APPDATA%\Converter\settings.json`.
 - Logs persistentes en `%APPDATA%\Converter\converter.log`.
@@ -37,6 +37,8 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 - Boton para abrir la carpeta de salida.
 - Interfaz moderna con logo propio y nombre `Converter`.
 - Modo nocturno/claro con cambio desde la cabecera.
+- Tooltips y guia integrada para explicar cada opcion de salida.
+- Campos contextuales: las opciones que no aplican se desactivan automaticamente.
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
 - Carga de metadatos en segundo plano para no congelar la interfaz con carpetas grandes.
@@ -88,8 +90,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.

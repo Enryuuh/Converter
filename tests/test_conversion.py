@@ -15,6 +15,7 @@ from app import (
     parse_output_formats,
     parse_version,
     resize_image,
+    ImageConverterApp,
 )
 
 
@@ -156,6 +157,26 @@ class ConversionTests(unittest.TestCase):
             with Image.open(destination) as image:
                 durations = [frame.info.get("duration") for frame in ImageSequence.Iterator(image)]
             self.assertEqual(durations, [40, 220])
+
+    def test_disabled_size_and_target_controls_are_ignored(self):
+        app = ImageConverterApp()
+        try:
+            app.withdraw()
+            app.output_format.set("WEBP")
+            app.extra_formats.set("")
+            app.background_hex.set("#ffffff")
+            app.resize_enabled.set(False)
+            app.resize_width.set("bad")
+            app.target_size_enabled.set(False)
+            app.target_size_kb.set("bad")
+
+            options = app._read_options()
+
+            self.assertIsNotNone(options)
+            self.assertIsNone(options.width)
+            self.assertIsNone(options.target_size_kb)
+        finally:
+            app.destroy()
 
 
 if __name__ == "__main__":

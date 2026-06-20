@@ -38,7 +38,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -161,6 +161,55 @@ def append_log(message: str) -> None:
             log_file.write(f"[{timestamp}] {message}\n")
     except OSError:
         pass
+
+
+class ToolTip:
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.tip_window: tk.Toplevel | None = None
+        self.after_id: str | None = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self.after_id = self.widget.after(450, self._show)
+
+    def _cancel(self) -> None:
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def _show(self) -> None:
+        if self.tip_window or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self.tip_window = tk.Toplevel(self.widget)
+        self.tip_window.wm_overrideredirect(True)
+        self.tip_window.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self.tip_window,
+            text=self.text,
+            justify="left",
+            bg="#111827",
+            fg="#f8fafc",
+            relief="solid",
+            bd=1,
+            padx=10,
+            pady=7,
+            wraplength=330,
+            font=("Segoe UI", 9),
+        )
+        label.pack()
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        if self.tip_window is not None:
+            self.tip_window.destroy()
+            self.tip_window = None
 
 
 def describe_image(path: Path) -> tuple[str, str, str, str]:
@@ -467,7 +516,9 @@ class ImageConverterApp(TkBase):
 
         self._apply_settings(self._load_settings())
         self._build_ui()
-        self._refresh_quality_state()
+        self.quality.trace_add("write", lambda *_args: self._refresh_option_states() if hasattr(self, "quality_label") else None)
+        self.extra_formats.trace_add("write", lambda *_args: self._refresh_option_states() if hasattr(self, "quality_label") else None)
+        self._refresh_option_states()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _theme_colors(self) -> dict[str, str]:
@@ -776,55 +827,99 @@ class ImageConverterApp(TkBase):
         for column in range(10):
             options.columnconfigure(column, weight=1 if column in {3, 5, 9} else 0)
 
-        tk.Label(options, text="Salida y optimizacion", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
-            row=0, column=0, columnspan=10, sticky="w", padx=16, pady=(14, 10)
+        options_head = tk.Frame(options, bg=self.colors["surface"])
+        options_head.grid(row=0, column=0, columnspan=10, sticky="ew", padx=16, pady=(14, 10))
+        options_head.columnconfigure(0, weight=1)
+        tk.Label(options_head, text="Salida y optimizacion", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        self._button(options_head, "Guia", self.show_options_guide, "ghost").grid(row=0, column=1, sticky="e")
+        tk.Label(
+            options_head,
+            text="Elige un ajuste rapido o modifica solo lo necesario. Pasa el cursor por una opcion para ver para que sirve.",
+            bg=self.colors["surface"],
+            fg=self.colors["muted"],
+            font=("Segoe UI", 9),
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-        self._field_label(options, "Preset").grid(row=1, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
+        self._field_label(options, "Ajuste rapido", "Atajo que rellena varias opciones segun el tipo de resultado que buscas.").grid(
+            row=1, column=0, sticky="w", padx=(16, 8), pady=(0, 10)
+        )
         self.preset_combo = ttk.Combobox(
             options,
             values=["Personalizado", "Para web", "Maxima calidad", "Reducir peso", "Icono .ico", "PDF desde imagenes"],
             state="readonly",
             width=18,
         )
+        self._tooltip(self.preset_combo, "Personalizado deja tus valores. Para web reduce peso. Maxima calidad prioriza detalle. PDF prepara salida en un archivo PDF.")
         self.preset_combo.set("Personalizado")
         self.preset_combo.grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=(0, 10))
         self.preset_combo.bind("<<ComboboxSelected>>", self.apply_preset)
 
-        self._field_label(options, "Formato").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 10))
-        format_combo = ttk.Combobox(
+        self._field_label(options, "Formato principal", "Formato principal que se generara para cada imagen.").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(0, 10))
+        self.format_combo = ttk.Combobox(
             options,
             textvariable=self.output_format,
             values=list(OUTPUT_FORMATS.keys()),
             state="readonly",
-            width=10,
+            width=12,
         )
-        format_combo.grid(row=1, column=3, sticky="ew", padx=(0, 14), pady=(0, 10))
-        format_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_quality_state())
+        self._tooltip(self.format_combo, "Ejemplo: WEBP para web, JPG para compatibilidad, PNG si necesitas transparencia, PDF para documentos.")
+        self.format_combo.grid(row=1, column=3, sticky="ew", padx=(0, 10), pady=(0, 10))
+        self.format_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_option_states())
 
-        self._field_label(options, "Calidad").grid(row=1, column=4, sticky="w", padx=(0, 8), pady=(0, 10))
+        self._field_label(options, "Calidad / compresion", "Solo afecta JPG, JPEG, WEBP y AVIF. Mas calidad = mejor imagen y mas peso.").grid(
+            row=1, column=4, sticky="w", padx=(0, 8), pady=(0, 10)
+        )
         self.quality_scale = ttk.Scale(options, from_=1, to=100, variable=self.quality, orient="horizontal")
-        self.quality_scale.grid(row=1, column=5, sticky="ew", padx=(0, 8), pady=(0, 10))
-        self.quality_label = tk.Label(options, textvariable=self.quality, width=4, bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 10))
+        self._tooltip(self.quality_scale, "85 es buen balance. Si activas peso objetivo, Converter ajusta la calidad para acercarse a ese limite.")
+        self.quality_scale.grid(row=1, column=5, sticky="ew", padx=(0, 6), pady=(0, 10))
+        self.quality_label = tk.Label(options, text=str(self.quality.get()), width=8, bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 10))
         self.quality_label.grid(row=1, column=6, sticky="w", pady=(0, 10))
 
-        self._check(options, "PDF unico", self.combine_pdf).grid(row=1, column=7, sticky="w", padx=(14, 0), pady=(0, 10))
-        self._field_label(options, "Extra").grid(row=1, column=8, sticky="e", padx=(10, 8), pady=(0, 10))
-        ttk.Entry(options, textvariable=self.extra_formats, width=14).grid(row=1, column=9, sticky="ew", padx=(0, 16), pady=(0, 10))
+        self._check(
+            options,
+            "Un solo PDF",
+            self.combine_pdf,
+            self._refresh_option_states,
+            "Une todas las imagenes en un unico PDF. El orden de la cola importa.",
+        ).grid(row=1, column=7, sticky="w", padx=(14, 0), pady=(0, 10))
+        self._field_label(options, "Formatos extra", "Crea copias adicionales aparte del formato principal.").grid(
+            row=1, column=8, sticky="e", padx=(10, 8), pady=(0, 10)
+        )
+        self.extra_formats_entry = ttk.Entry(options, textvariable=self.extra_formats, width=14)
+        self._tooltip(self.extra_formats_entry, "Opcional. Escribe formatos separados por coma, por ejemplo: PNG,JPG,AVIF.")
+        self.extra_formats_entry.grid(row=1, column=9, sticky="ew", padx=(0, 16), pady=(0, 10))
 
-        self._field_label(options, "Carpeta de salida").grid(row=2, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
+        self._field_label(options, "Carpeta de salida", "Lugar donde se guardaran los archivos convertidos.").grid(
+            row=2, column=0, sticky="w", padx=(16, 8), pady=(0, 10)
+        )
         output_entry = ttk.Entry(options, textvariable=self.output_dir)
+        self._tooltip(output_entry, "Puedes escribir una ruta o usar Elegir. Si no existe, Converter intenta crearla.")
         output_entry.grid(row=2, column=1, columnspan=6, sticky="ew", padx=(0, 10), pady=(0, 10))
-        self._button(options, "Examinar", self.choose_output_dir, "ghost").grid(row=2, column=7, sticky="ew", padx=(0, 8), pady=(0, 10))
-        self._button(options, "Abrir", self.open_output_dir, "ghost").grid(row=2, column=8, sticky="ew", pady=(0, 10))
+        self._button(options, "Elegir...", self.choose_output_dir, "ghost").grid(row=2, column=7, sticky="ew", padx=(0, 8), pady=(0, 10))
+        self._button(options, "Abrir carpeta", self.open_output_dir, "ghost").grid(row=2, column=8, sticky="ew", pady=(0, 10))
 
-        self._check(options, "Redimensionar", self.resize_enabled).grid(row=3, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
-        self._field_label(options, "Ancho").grid(row=3, column=1, sticky="e", padx=(0, 8), pady=(0, 10))
-        ttk.Entry(options, textvariable=self.resize_width, width=8).grid(row=3, column=2, sticky="ew", padx=(0, 12), pady=(0, 10))
-        self._field_label(options, "Alto").grid(row=3, column=3, sticky="e", padx=(0, 8), pady=(0, 10))
-        ttk.Entry(options, textvariable=self.resize_height, width=8).grid(row=3, column=4, sticky="ew", padx=(0, 12), pady=(0, 10))
-        self._check(options, "Mantener proporcion", self.keep_aspect).grid(row=3, column=5, sticky="w", padx=(0, 12), pady=(0, 10))
-        self._button(options, "Fondo", self.choose_background, "ghost").grid(row=3, column=6, sticky="ew", padx=(0, 8), pady=(0, 10))
+        self._check(
+            options,
+            "Cambiar tamano",
+            self.resize_enabled,
+            self._refresh_option_states,
+            "Activa Ancho/Alto para reducir o ampliar imagenes.",
+        ).grid(row=3, column=0, sticky="w", padx=(16, 8), pady=(0, 10))
+        self._field_label(options, "Ancho px", "Ancho final en pixeles. Puedes dejarlo vacio.").grid(row=3, column=1, sticky="e", padx=(0, 8), pady=(0, 10))
+        self.resize_width_entry = ttk.Entry(options, textvariable=self.resize_width, width=8)
+        self._tooltip(self.resize_width_entry, "Ejemplo: 1600. Si mantienes proporcion, el alto se calcula automaticamente si lo dejas vacio.")
+        self.resize_width_entry.grid(row=3, column=2, sticky="ew", padx=(0, 12), pady=(0, 10))
+        self._field_label(options, "Alto px", "Alto final en pixeles. Puedes dejarlo vacio.").grid(row=3, column=3, sticky="e", padx=(0, 8), pady=(0, 10))
+        self.resize_height_entry = ttk.Entry(options, textvariable=self.resize_height, width=8)
+        self._tooltip(self.resize_height_entry, "Ejemplo: 1080. Si mantienes proporcion, el ancho se calcula automaticamente si lo dejas vacio.")
+        self.resize_height_entry.grid(row=3, column=4, sticky="ew", padx=(0, 12), pady=(0, 10))
+        self.keep_aspect_check = self._check(options, "Proporcion", self.keep_aspect, tooltip="Mantiene la proporcion original y evita que la imagen se deforme.")
+        self.keep_aspect_check.grid(row=3, column=5, sticky="w", padx=(0, 12), pady=(0, 10))
+        self.background_button = self._button(options, "Color fondo", self.choose_background, "ghost")
+        self._tooltip(self.background_button, "Color usado cuando el formato no conserva transparencia, como JPG, BMP o PDF.")
+        self.background_button.grid(row=3, column=6, sticky="ew", padx=(0, 8), pady=(0, 10))
         self.color_swatch = tk.Label(
             options,
             textvariable=self.background_hex,
@@ -835,23 +930,35 @@ class ImageConverterApp(TkBase):
             bd=1,
             font=("Segoe UI", 9),
         )
+        self._tooltip(self.color_swatch, "Se usa cuando el formato no soporta transparencia, por ejemplo JPG, BMP o PDF.")
         self.color_swatch.grid(row=3, column=7, columnspan=2, sticky="ew", pady=(0, 10))
 
-        self._field_label(options, "Nombre").grid(row=4, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
-        ttk.Combobox(
+        self._field_label(options, "Nombre de archivo", "Define como se llamaran los archivos de salida.").grid(row=4, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
+        self.naming_combo = ttk.Combobox(
             options,
             textvariable=self.naming_mode,
             values=["Conservar", "Numerado", "Prefijo/sufijo"],
             state="readonly",
             width=15,
-        ).grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._field_label(options, "Prefijo").grid(row=4, column=2, sticky="e", padx=(0, 8), pady=(0, 16))
-        ttk.Entry(options, textvariable=self.prefix, width=12).grid(row=4, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._field_label(options, "Sufijo").grid(row=4, column=4, sticky="e", padx=(0, 8), pady=(0, 16))
-        ttk.Entry(options, textvariable=self.suffix, width=12).grid(row=4, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._check(options, "Sobrescribir", self.overwrite).grid(row=4, column=6, sticky="w", pady=(0, 16))
+        )
+        self._tooltip(self.naming_combo, "Conservar usa el nombre original. Numerado agrega 001, 002... Prefijo/sufijo agrega texto antes o despues.")
+        self.naming_combo.grid(row=4, column=1, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self.naming_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_option_states())
+        self._field_label(options, "Prefijo", "Texto que se agrega antes del nombre original cuando eliges Prefijo/sufijo.").grid(
+            row=4, column=2, sticky="e", padx=(0, 8), pady=(0, 16)
+        )
+        self.prefix_entry = ttk.Entry(options, textvariable=self.prefix, width=12)
+        self.prefix_entry.grid(row=4, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._field_label(options, "Sufijo", "Texto que se agrega al final del nombre original cuando eliges Prefijo/sufijo.").grid(
+            row=4, column=4, sticky="e", padx=(0, 8), pady=(0, 16)
+        )
+        self.suffix_entry = ttk.Entry(options, textvariable=self.suffix, width=12)
+        self.suffix_entry.grid(row=4, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._check(options, "Reemplazar existentes", self.overwrite, tooltip="Si existe un archivo con el mismo nombre, lo reemplaza. Si esta apagado, crea nombres nuevos.").grid(
+            row=4, column=6, sticky="w", pady=(0, 16)
+        )
 
-        self._field_label(options, "Perfil").grid(row=5, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
+        self._field_label(options, "Perfil", "Guarda y carga combinaciones de opciones que usas seguido.").grid(row=5, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
         self.profile_combo = ttk.Combobox(
             options,
             textvariable=self.profile_name,
@@ -859,13 +966,24 @@ class ImageConverterApp(TkBase):
             state="readonly",
             width=18,
         )
+        self._tooltip(self.profile_combo, "Selecciona un perfil guardado y pulsa Cargar. Pulsa Guardar para crear uno nuevo.")
         self.profile_combo.grid(row=5, column=1, sticky="ew", padx=(0, 8), pady=(0, 16))
         self._button(options, "Cargar", self.load_selected_profile, "ghost").grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=(0, 16))
         self._button(options, "Guardar", self.save_current_profile, "ghost").grid(row=5, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._check(options, "Objetivo KB", self.target_size_enabled).grid(row=5, column=4, sticky="w", padx=(0, 8), pady=(0, 16))
-        ttk.Entry(options, textvariable=self.target_size_kb, width=9).grid(row=5, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
-        self._field_label(options, "Procesos").grid(row=5, column=6, sticky="e", padx=(0, 8), pady=(0, 16))
-        tk.Spinbox(
+        self._check(
+            options,
+            "Peso maximo (KB)",
+            self.target_size_enabled,
+            self._refresh_option_states,
+            "Intenta que cada archivo pese como maximo el numero de KB indicado. Solo aplica a formatos con calidad.",
+        ).grid(row=5, column=4, sticky="w", padx=(0, 8), pady=(0, 16))
+        self.target_size_entry = ttk.Entry(options, textvariable=self.target_size_kb, width=9)
+        self._tooltip(self.target_size_entry, "Ejemplo: 500 para intentar dejar cada imagen bajo 500 KB. Si es imposible, Converter avisa.")
+        self.target_size_entry.grid(row=5, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._field_label(options, "En paralelo", "Cantidad de conversiones simultaneas. Mas tareas puede ser mas rapido, pero usa mas CPU/RAM.").grid(
+            row=5, column=6, sticky="e", padx=(0, 8), pady=(0, 16)
+        )
+        self.max_workers_spinbox = tk.Spinbox(
             options,
             from_=1,
             to=max(1, min(16, os.cpu_count() or 1)),
@@ -883,9 +1001,15 @@ class ImageConverterApp(TkBase):
             relief="solid",
             bd=1,
             font=("Segoe UI", 9),
-        ).grid(row=5, column=7, sticky="w", pady=(0, 16))
-        self._check(options, "Quitar metadatos", self.strip_metadata).grid(row=5, column=8, sticky="w", padx=(10, 8), pady=(0, 16))
-        self._check(options, "Abrir al terminar", self.open_output_when_done).grid(row=5, column=9, sticky="w", padx=(0, 16), pady=(0, 16))
+        )
+        self._tooltip(self.max_workers_spinbox, "Recomendado: 2 a 4. Sube este valor si tienes CPU suficiente y archivos medianos.")
+        self.max_workers_spinbox.grid(row=5, column=7, sticky="w", pady=(0, 16))
+        self._check(options, "Quitar datos EXIF", self.strip_metadata, tooltip="Elimina datos como camara, fecha, GPS y otros metadatos cuando sea posible. Mejor para privacidad.").grid(
+            row=5, column=8, sticky="w", padx=(10, 8), pady=(0, 16)
+        )
+        self._check(options, "Abrir al final", self.open_output_when_done, tooltip="Abre automaticamente la carpeta de salida cuando termine la conversion.").grid(
+            row=5, column=9, sticky="w", padx=(0, 16), pady=(0, 16)
+        )
 
         footer = tk.Frame(self, bg=self.colors["bg"])
         footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
@@ -909,8 +1033,14 @@ class ImageConverterApp(TkBase):
     def _card(self, parent) -> tk.Frame:
         return tk.Frame(parent, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
 
-    def _field_label(self, parent, text: str) -> tk.Label:
-        return tk.Label(parent, text=text, bg=self.colors["surface"], fg=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+    def _tooltip(self, widget: tk.Widget, text: str) -> None:
+        ToolTip(widget, text)
+
+    def _field_label(self, parent, text: str, tooltip: str | None = None) -> tk.Label:
+        label = tk.Label(parent, text=text, bg=self.colors["surface"], fg=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+        if tooltip:
+            self._tooltip(label, tooltip)
+        return label
 
     def _text_color_for_background(self, color: str) -> str:
         try:
@@ -925,11 +1055,12 @@ class ImageConverterApp(TkBase):
             color = self.background_hex.get()
             self.color_swatch.configure(bg=color, fg=self._text_color_for_background(color))
 
-    def _check(self, parent, text: str, variable: tk.BooleanVar) -> tk.Checkbutton:
-        return tk.Checkbutton(
+    def _check(self, parent, text: str, variable: tk.BooleanVar, command=None, tooltip: str | None = None) -> tk.Checkbutton:
+        check = tk.Checkbutton(
             parent,
             text=text,
             variable=variable,
+            command=command,
             bg=self.colors["surface"],
             fg=self.colors["text"],
             activebackground=self.colors["surface"],
@@ -939,6 +1070,9 @@ class ImageConverterApp(TkBase):
             bd=0,
             highlightthickness=0,
         )
+        if tooltip:
+            self._tooltip(check, tooltip)
+        return check
 
     def _button(self, parent, text: str, command, variant: str = "secondary") -> tk.Button:
         palette = {
@@ -1242,6 +1376,21 @@ class ImageConverterApp(TkBase):
             os.startfile(LOG_PATH)
         except OSError as exc:
             messagebox.showerror(APP_NAME, f"No se pudo abrir el log:\n{exc}")
+
+    def show_options_guide(self) -> None:
+        messagebox.showinfo(
+            APP_NAME,
+            "Guia rapida de salida\n\n"
+            "Formato: tipo principal que se va a generar.\n"
+            "Otros formatos: salidas adicionales, por ejemplo PNG,JPG.\n"
+            "Un solo PDF: une todas las imagenes en un PDF; usa el orden de la cola.\n"
+            "Cambiar tamano: activa Ancho/Alto en pixeles.\n"
+            "Color fondo: rellena transparencias cuando el formato no las soporta.\n"
+            "Nombrado: controla nombres nuevos, numerados o con prefijo/sufijo.\n"
+            "Peso max KB: intenta limitar el peso final por archivo.\n"
+            "Tareas: conversiones paralelas; 2 a 4 suele ser buen valor.\n"
+            "Quitar EXIF: elimina metadatos privados como camara, fecha o GPS.",
+        )
 
     def update_preview(self, _event=None) -> None:
         selected = self.file_tree.selection()
@@ -1547,7 +1696,7 @@ class ImageConverterApp(TkBase):
             self._build_ui()
             self._restore_file_tree()
             self._restore_history()
-        self._refresh_quality_state()
+        self._refresh_option_states()
         self.status.set(f"Perfil cargado: {name}")
 
     def check_for_updates(self) -> None:
@@ -1617,26 +1766,64 @@ class ImageConverterApp(TkBase):
             self._refresh_color_swatch()
         self._refresh_quality_state()
 
-    def _refresh_quality_state(self) -> None:
-        enabled = OUTPUT_FORMATS[self.output_format.get()]["quality"]
+    def _selected_output_formats(self, strict: bool = False) -> tuple[str, ...]:
+        try:
+            output_formats = parse_output_formats(self.output_format.get(), self.extra_formats.get())
+        except ValueError:
+            if strict:
+                raise
+            output_formats = (self.output_format.get(),)
+        if self.combine_pdf.get() and "PDF" not in output_formats:
+            output_formats = ("PDF", *output_formats)
+        return output_formats
+
+    def _set_widget_state(self, widget_name: str, enabled: bool) -> None:
+        if not hasattr(self, widget_name):
+            return
+        widget = getattr(self, widget_name)
         state = tk.NORMAL if enabled else tk.DISABLED
-        self.quality_scale.configure(state=state)
-        self.quality_label.configure(foreground=self.colors["text"] if enabled else self.colors["muted"])
+        try:
+            widget.configure(state=state)
+        except tk.TclError:
+            pass
+
+    def _refresh_quality_state(self) -> None:
+        self._refresh_option_states()
+
+    def _refresh_option_states(self) -> None:
+        if not hasattr(self, "quality_scale"):
+            return
+        output_formats = self._selected_output_formats()
+        quality_enabled = any(OUTPUT_FORMATS.get(fmt, {}).get("quality", False) for fmt in output_formats)
+        resize_enabled = self.resize_enabled.get()
+        target_enabled = self.target_size_enabled.get() and quality_enabled
+        prefix_enabled = self.naming_mode.get() == "Prefijo/sufijo"
+        background_enabled = any(not OUTPUT_FORMATS.get(fmt, {}).get("supports_alpha", False) for fmt in output_formats)
+
+        self.quality_scale.configure(state=tk.NORMAL if quality_enabled else tk.DISABLED)
+        self.quality_label.configure(text=str(self.quality.get()) if quality_enabled else "No aplica", foreground=self.colors["text"] if quality_enabled else self.colors["muted"])
+        self._set_widget_state("resize_width_entry", resize_enabled)
+        self._set_widget_state("resize_height_entry", resize_enabled)
+        self._set_widget_state("keep_aspect_check", resize_enabled)
+        self._set_widget_state("target_size_entry", target_enabled)
+        self._set_widget_state("prefix_entry", prefix_enabled)
+        self._set_widget_state("suffix_entry", prefix_enabled)
+        self._set_widget_state("background_button", background_enabled)
+        if hasattr(self, "color_swatch"):
+            self.color_swatch.configure(fg=self._text_color_for_background(self.background_hex.get()))
 
     def _read_options(self) -> ConversionOptions | None:
         try:
-            output_formats = parse_output_formats(self.output_format.get(), self.extra_formats.get())
-            if self.combine_pdf.get() and "PDF" not in output_formats:
-                output_formats = ("PDF", *output_formats)
+            output_formats = self._selected_output_formats(strict=True)
             background = ImageColor.getrgb(self.background_hex.get())
-            width = int(self.resize_width.get()) if self.resize_width.get().strip() else None
-            height = int(self.resize_height.get()) if self.resize_height.get().strip() else None
-            target_size = int(self.target_size_kb.get()) if self.target_size_kb.get().strip() else None
+            width = int(self.resize_width.get()) if self.resize_enabled.get() and self.resize_width.get().strip() else None
+            height = int(self.resize_height.get()) if self.resize_enabled.get() and self.resize_height.get().strip() else None
+            target_size = int(self.target_size_kb.get()) if self.target_size_enabled.get() and self.target_size_kb.get().strip() else None
             max_workers = int(self.max_workers.get())
             if width is not None and width <= 0 or height is not None and height <= 0:
                 raise ValueError("El ancho y alto deben ser mayores a cero.")
             if target_size is not None and target_size <= 0:
-                raise ValueError("El peso objetivo debe ser mayor a cero.")
+                raise ValueError("Peso maximo (KB) debe ser mayor que cero.")
             if max_workers <= 0:
                 raise ValueError("La cantidad de procesos debe ser mayor a cero.")
         except ValueError as exc:
@@ -1682,6 +1869,7 @@ class ImageConverterApp(TkBase):
 
         files = list(self.files)
         self._save_settings()
+        append_log(f"Inicio conversion: {len(files)} archivo(s), formatos={','.join(options.output_formats)}, salida={options.output_dir}")
         self.cancel_event.clear()
         self.conversion_running = True
         self.convert_button.configure(state=tk.DISABLED)
@@ -1839,12 +2027,15 @@ class ImageConverterApp(TkBase):
 
         if cancelled:
             self.status.set(f"Cancelado. Generados: {converted}. Errores: {len(errors)}. {summary}")
+            append_log(f"Conversion cancelada: generados={converted}, errores={len(errors)}, {summary}")
             messagebox.showinfo(APP_NAME, f"Conversion cancelada.\nArchivos generados: {converted}\n{summary}")
         elif errors:
             self.status.set(f"Generados: {converted}. Errores: {len(errors)}. {summary}")
+            append_log(f"Conversion terminada con errores: generados={converted}, errores={len(errors)}, {summary}")
             messagebox.showwarning(APP_NAME, "Algunas imagenes no se pudieron convertir:\n\n" + "\n".join(errors[:10]))
         else:
             self.status.set(f"Listo. Generados: {converted}. {summary}")
+            append_log(f"Conversion terminada: generados={converted}, {summary}")
             messagebox.showinfo(APP_NAME, f"Conversion terminada.\nArchivos generados: {converted}\n{summary}")
         if not cancelled and outputs and self.open_output_when_done.get():
             self.open_output_dir()

@@ -24,3 +24,7 @@ if (-not (Test-Path $pythonExe)) {
 
 Write-Host ""
 Write-Host "EXE creado en: dist\Converter.exe"
+
+$checksumPath = "dist\checksums-sha256.txt"
+Get-FileHash "dist\Converter.exe" -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  Converter.exe" } | Set-Content $checksumPath
+Write-Host "Checksum creado en: $checksumPath"
