@@ -6,7 +6,7 @@ if (-not $iscc) {
 }
 
 if (-not $env:APP_VERSION) {
-  $env:APP_VERSION = "1.3.3"
+  $env:APP_VERSION = "1.3.4"
 }
 
 & $iscc.Source ".\installer\Converter.iss"

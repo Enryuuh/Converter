@@ -1,19 +1,23 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 from PIL import Image
 from PIL import ImageSequence
 
+import app as converter_app
 from app import (
     ConversionOptions,
     build_output_path,
     combine_images_to_pdf,
     convert_image_optimized,
+    describe_image,
     estimate_final_output_size,
     format_conversion_summary,
     format_output_estimate_summary,
     flatten_alpha,
+    is_raw_image,
     is_supported_image,
     parse_output_formats,
     parse_version,
@@ -104,6 +108,53 @@ class ConversionTests(unittest.TestCase):
             source.write_text("not an image", encoding="utf-8")
 
             self.assertFalse(is_supported_image(source))
+
+    def test_raw_extension_is_supported_input(self):
+        source = Path("camera.nef")
+
+        self.assertTrue(is_raw_image(source))
+        self.assertTrue(is_supported_image(source))
+
+    def test_describe_raw_image_uses_rawpy_sizes(self):
+        class FakeRaw:
+            sizes = SimpleNamespace(
+                iwidth=6048,
+                width=6048,
+                raw_width=6080,
+                iheight=4024,
+                height=4024,
+                raw_height=4040,
+            )
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        class FakeRawpy:
+            @staticmethod
+            def imread(_path):
+                return FakeRaw()
+
+        original_rawpy = converter_app.rawpy
+        original_available = converter_app.RAWPY_AVAILABLE
+        converter_app.rawpy = FakeRawpy()
+        converter_app.RAWPY_AVAILABLE = True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source = Path(tmp) / "camera.dng"
+                source.write_bytes(b"fake raw payload")
+
+                image_format, dimensions, details, weight = describe_image(source)
+
+            self.assertEqual(image_format, "RAW (DNG)")
+            self.assertEqual(dimensions, "6048 x 4024")
+            self.assertEqual(details, "RAW de camara")
+            self.assertNotEqual(weight, "-")
+        finally:
+            converter_app.rawpy = original_rawpy
+            converter_app.RAWPY_AVAILABLE = original_available
 
     def test_format_conversion_summary_reports_savings(self):
         self.assertIn("50.0% menos", format_conversion_summary(2000, 1000))

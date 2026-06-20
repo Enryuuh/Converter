@@ -2,6 +2,7 @@
 
 Aplicacion de escritorio para convertir imagenes por lote entre formatos comunes:
 PNG, JPG, JPEG, WEBP, AVIF, BMP, TIFF, GIF, ICO y PDF.
+Tambien importa RAW de camara comunes como DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2 y SRW para convertirlos a formatos normales.
 
 Descarga la version para Windows desde [GitHub Releases](https://github.com/Enryuuh/Converter/releases/latest).
 
@@ -17,6 +18,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Estimacion de peso para todo el lote antes de convertir.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
 - Autodeteccion por contenido para imagenes sin extension o con extension no estandar.
+- Importacion de RAW de camara mediante `rawpy`/LibRaw.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
 - Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
 - Reordenar la cola con botones para subir y bajar imagenes.
@@ -93,8 +95,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.3
-git push origin v1.3.3
+git tag v1.3.4
+git push origin v1.3.4
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
@@ -110,4 +112,5 @@ python app.py
 
 - Al convertir a JPG, BMP o PDF, la transparencia se reemplaza con fondo blanco.
 - Para GIF, WEBP, TIFF y PDF se intenta conservar multiples frames cuando la imagen origen los tiene.
+- RAW funciona como entrada, no como formato de salida. Converter revela el RAW a RGB y lo exporta a JPG, PNG, WEBP, AVIF, TIFF, PDF u otros formatos soportados.
 - La compatibilidad exacta depende de Pillow y de los codecs disponibles en Windows.

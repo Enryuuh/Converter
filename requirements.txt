@@ -1,4 +1,6 @@
 Pillow==12.2.0
 pillow-heif==1.4.0
+numpy==2.4.6
+rawpy==0.27.0
 tkinterdnd2==0.5.0
 pyinstaller==6.21.0

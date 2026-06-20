@@ -20,6 +20,14 @@ from tkinter import ttk
 from PIL import Image, ImageColor, ImageOps, ImageSequence, ImageTk, UnidentifiedImageError
 
 try:
+    import rawpy
+
+    RAWPY_AVAILABLE = True
+except Exception:
+    rawpy = None
+    RAWPY_AVAILABLE = False
+
+try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
 
     TkBase = TkinterDnD.Tk
@@ -38,7 +46,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -50,7 +58,7 @@ PROFILES_PATH = CONFIG_DIR / "profiles.json"
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
 LOG_PATH = CONFIG_DIR / "converter.log"
 
-SUPPORTED_INPUT_EXTENSIONS = {
+STANDARD_INPUT_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".jpe",
@@ -71,6 +79,41 @@ SUPPORTED_INPUT_EXTENSIONS = {
     ".avif",
 }
 
+RAW_INPUT_EXTENSIONS = {
+    ".3fr",
+    ".ari",
+    ".arw",
+    ".bay",
+    ".cr2",
+    ".cr3",
+    ".crw",
+    ".dcr",
+    ".dng",
+    ".erf",
+    ".fff",
+    ".gpr",
+    ".iiq",
+    ".k25",
+    ".kdc",
+    ".mef",
+    ".mos",
+    ".mrw",
+    ".nef",
+    ".nrw",
+    ".orf",
+    ".pef",
+    ".raf",
+    ".raw",
+    ".rw2",
+    ".rwl",
+    ".sr2",
+    ".srf",
+    ".srw",
+    ".x3f",
+}
+
+SUPPORTED_INPUT_EXTENSIONS = STANDARD_INPUT_EXTENSIONS | RAW_INPUT_EXTENSIONS
+
 OUTPUT_FORMATS = {
     "PNG": {"ext": ".png", "save_format": "PNG", "supports_alpha": True, "quality": False},
     "JPG": {"ext": ".jpg", "save_format": "JPEG", "supports_alpha": False, "quality": True},
@@ -86,8 +129,12 @@ OUTPUT_FORMATS = {
 
 INPUT_FILE_TYPES = [
     (
-        "Imagenes",
-        "*.jpg *.jpeg *.jpe *.jfif *.png *.webp *.bmp *.dib *.gif *.tif *.tiff *.ico *.heic *.heif *.ppm *.pgm *.pbm *.avif",
+        "Imagenes y RAW",
+        "*.jpg *.jpeg *.jpe *.jfif *.png *.webp *.bmp *.dib *.gif *.tif *.tiff *.ico *.heic *.heif *.ppm *.pgm *.pbm *.avif *.3fr *.ari *.arw *.bay *.cr2 *.cr3 *.crw *.dcr *.dng *.erf *.fff *.gpr *.iiq *.k25 *.kdc *.mef *.mos *.mrw *.nef *.nrw *.orf *.pef *.raf *.raw *.rw2 *.rwl *.sr2 *.srf *.srw *.x3f",
+    ),
+    (
+        "RAW de camara",
+        "*.3fr *.ari *.arw *.bay *.cr2 *.cr3 *.crw *.dcr *.dng *.erf *.fff *.gpr *.iiq *.k25 *.kdc *.mef *.mos *.mrw *.nef *.nrw *.orf *.pef *.raf *.raw *.rw2 *.rwl *.sr2 *.srf *.srw *.x3f",
     ),
     ("Todos los archivos", "*.*"),
 ]
@@ -122,12 +169,21 @@ def is_supported_image(path: Path) -> bool:
     return can_identify_image(path)
 
 
+def is_raw_image(path: Path) -> bool:
+    return path.suffix.lower() in RAW_INPUT_EXTENSIONS
+
+
 def can_identify_image(path: Path) -> bool:
     try:
         with Image.open(path) as image:
             return bool(image.format)
     except (OSError, SyntaxError, ValueError, UnidentifiedImageError):
         return False
+
+
+def raw_format_name(path: Path) -> str:
+    extension = path.suffix.replace(".", "").upper() or "RAW"
+    return f"RAW ({extension})"
 
 
 def parse_version(version: str) -> tuple[int, ...]:
@@ -237,7 +293,34 @@ class ToolTip:
             self.tip_window = None
 
 
+def load_raw_image(path: Path) -> Image.Image:
+    if not RAWPY_AVAILABLE or rawpy is None:
+        raise RuntimeError("Soporte RAW no disponible. Instala rawpy para revelar archivos RAW.")
+
+    with rawpy.imread(str(path)) as raw:
+        rgb = raw.postprocess(use_camera_wb=True, output_bps=8)
+    return Image.fromarray(rgb)
+
+
+def describe_raw_image(path: Path) -> tuple[str, str, str, str]:
+    weight = format_size(path.stat().st_size) if path.exists() else "-"
+    if not RAWPY_AVAILABLE or rawpy is None:
+        return raw_format_name(path), "No detectado", "Soporte RAW no disponible", weight
+
+    try:
+        with rawpy.imread(str(path)) as raw:
+            sizes = raw.sizes
+            width = sizes.iwidth or sizes.width or sizes.raw_width
+            height = sizes.iheight or sizes.height or sizes.raw_height
+        return raw_format_name(path), f"{width} x {height}", "RAW de camara", weight
+    except Exception as exc:
+        return raw_format_name(path), "No detectado", f"RAW no soportado: {exc}", weight
+
+
 def describe_image(path: Path) -> tuple[str, str, str, str]:
+    if is_raw_image(path):
+        return describe_raw_image(path)
+
     try:
         with Image.open(path) as image:
             image_format = image.format or path.suffix.replace(".", "").upper() or "DESCONOCIDO"
@@ -361,6 +444,10 @@ def build_save_kwargs(options: ConversionOptions, quality_override: int | None =
 
 
 def prepared_frames_from_source(source: Path, options: ConversionOptions) -> tuple[list[Image.Image], bool, dict]:
+    if is_raw_image(source):
+        image = load_raw_image(source)
+        return [prepare_frame(image, options)], False, {}
+
     with Image.open(source) as image:
         preserve_frames = getattr(image, "is_animated", False) and options.output_format in {"GIF", "WEBP", "TIFF", "PDF"}
         source_info = {
@@ -416,6 +503,9 @@ def save_prepared_frames(
 
 
 def converted_first_frame(source: Path, options: ConversionOptions) -> Image.Image:
+    if is_raw_image(source):
+        return prepare_frame(load_raw_image(source), options)
+
     with Image.open(source) as image:
         return prepare_frame(ImageOps.exif_transpose(image), options)
 
@@ -482,9 +572,12 @@ def convert_image_optimized(source: Path, destination: Path, options: Conversion
 def combine_images_to_pdf(files: list[Path], destination: Path, options: ConversionOptions) -> Path:
     pages: list[Image.Image] = []
     for source in files:
-        with Image.open(source) as image:
-            first_frame = ImageOps.exif_transpose(next(ImageSequence.Iterator(image)))
-            pages.append(flatten_alpha(resize_image(first_frame, options), options.background))
+        if is_raw_image(source):
+            first_frame = load_raw_image(source)
+        else:
+            with Image.open(source) as image:
+                first_frame = ImageOps.exif_transpose(next(ImageSequence.Iterator(image)))
+        pages.append(flatten_alpha(resize_image(first_frame, options), options.background))
 
     if not pages:
         raise ValueError("No hay imagenes para PDF.")
@@ -1422,6 +1515,7 @@ class ImageConverterApp(TkBase):
             APP_NAME,
             "Guia rapida de salida\n\n"
             "Formato: tipo principal que se va a generar.\n"
+            "RAW: se importa como entrada de camara y se exporta a formatos normales; no aparece como salida.\n"
             "Otros formatos: salidas adicionales, por ejemplo PNG,JPG.\n"
             "Peso estimado: aparece en la vista previa y cambia al ajustar formato, calidad o tamano.\n"
             "Un solo PDF: une todas las imagenes en un PDF; usa el orden de la cola.\n"
@@ -1516,14 +1610,17 @@ class ImageConverterApp(TkBase):
         path = Path(selected[0])
         self.preview_canvas.delete("all")
         try:
-            with Image.open(path) as image:
-                image.draft("RGB", (410, 240))
-                image = ImageOps.exif_transpose(image)
-                image.thumbnail((410, 240), Image.Resampling.LANCZOS)
-                preview = image.convert("RGBA")
-                self.preview_image = ImageTk.PhotoImage(preview)
-                width = self.preview_canvas.winfo_width() or 360
-                self.preview_canvas.create_image(width // 2, 120, image=self.preview_image, anchor="center")
+            if is_raw_image(path):
+                image = load_raw_image(path)
+            else:
+                with Image.open(path) as opened:
+                    opened.draft("RGB", (410, 240))
+                    image = ImageOps.exif_transpose(opened)
+            image.thumbnail((410, 240), Image.Resampling.LANCZOS)
+            preview = image.convert("RGBA")
+            self.preview_image = ImageTk.PhotoImage(preview)
+            width = self.preview_canvas.winfo_width() or 360
+            self.preview_canvas.create_image(width // 2, 120, image=self.preview_image, anchor="center")
             metadata = self.metadata_cache.get(path)
             if metadata is None:
                 metadata = describe_image(path)
@@ -1572,11 +1669,14 @@ class ImageConverterApp(TkBase):
 
     def _preview_output_worker(self, request_id: int, path: Path, options: ConversionOptions) -> None:
         try:
-            with Image.open(path) as image:
-                image.draft("RGB", (190, 190))
-                original = ImageOps.exif_transpose(image)
-                original.thumbnail((190, 190), Image.Resampling.LANCZOS)
-                original = original.convert("RGBA")
+            if is_raw_image(path):
+                original = load_raw_image(path)
+            else:
+                with Image.open(path) as image:
+                    image.draft("RGB", (190, 190))
+                    original = ImageOps.exif_transpose(image)
+            original.thumbnail((190, 190), Image.Resampling.LANCZOS)
+            original = original.convert("RGBA")
             output = converted_first_frame(path, options).convert("RGBA")
             output.thumbnail((190, 190), Image.Resampling.LANCZOS)
             original_size = path.stat().st_size
