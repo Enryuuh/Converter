@@ -8,6 +8,7 @@ tmp*/
 
 # Release binaries are uploaded to GitHub Releases.
 dist/*.exe
+dist/*.txt
 
 # Local environment files.
 .env

@@ -11,6 +11,7 @@ from app import (
     ConversionOptions,
     build_output_path,
     combine_images_to_pdf,
+    create_outputs_zip,
     convert_image_optimized,
     describe_image,
     estimate_final_output_size,
@@ -24,6 +25,7 @@ from app import (
     is_supported_image,
     parse_output_formats,
     parse_version,
+    pdf_page_dimensions,
     remove_background_from_image,
     render_output_stem,
     run_cli,
@@ -73,9 +75,16 @@ def make_options(**overrides):
         "square_canvas": False,
         "canvas_size": None,
         "canvas_transparent": True,
+        "brightness": 0,
+        "contrast": 0,
+        "saturation": 0,
         "large_file_rule_enabled": False,
         "large_file_threshold_kb": None,
         "large_file_quality": 72,
+        "pdf_page_size": "Original",
+        "pdf_auto_orientation": True,
+        "create_zip": False,
+        "notify_on_done": False,
     }
     values.update(overrides)
     return ConversionOptions(**values)
@@ -353,6 +362,12 @@ class ConversionTests(unittest.TestCase):
             self.assertTrue(destination.exists())
             self.assertGreater(destination.stat().st_size, 0)
 
+    def test_pdf_page_dimensions_uses_auto_landscape(self):
+        image = Image.new("RGB", (400, 200), "white")
+        options = make_options(output_format="PDF", output_formats=("PDF",), pdf_page_size="A4", pdf_auto_orientation=True)
+
+        self.assertEqual(pdf_page_dimensions(image, options), (3508, 2480))
+
     def test_animated_gif_preserves_frame_durations(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
@@ -368,18 +383,34 @@ class ConversionTests(unittest.TestCase):
                 durations = [frame.info.get("duration") for frame in ImageSequence.Iterator(image)]
             self.assertEqual(durations, [40, 220])
 
-    def test_write_conversion_reports_creates_txt_and_csv(self):
+    def test_create_outputs_zip_adds_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            first = output_dir / "a.webp"
+            second = output_dir / "b.webp"
+            destination = output_dir / "bundle.zip"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+
+            create_outputs_zip([first, second], destination)
+
+            self.assertTrue(destination.exists())
+            self.assertGreater(destination.stat().st_size, 0)
+
+    def test_write_conversion_reports_creates_txt_csv_and_html(self):
         with tempfile.TemporaryDirectory() as tmp:
             output_dir = Path(tmp)
             output = output_dir / "out.webp"
             output.write_bytes(b"123")
 
-            txt_path, csv_path = write_conversion_reports(output_dir, [output], ["bad file"], 1, False, 1000, 3)
+            txt_path, csv_path, html_path = write_conversion_reports(output_dir, [output], ["bad file"], 1, False, 1000, 3)
 
             self.assertTrue(txt_path.exists())
             self.assertTrue(csv_path.exists())
+            self.assertTrue(html_path.exists())
             self.assertIn("out.webp", txt_path.read_text(encoding="utf-8"))
             self.assertIn("bad file", csv_path.read_text(encoding="utf-8"))
+            self.assertIn("Reporte Converter", html_path.read_text(encoding="utf-8"))
 
     def test_run_cli_converts_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,10 +22,13 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Estimacion de peso y ahorro total para todo el lote antes de convertir.
 - Pausar/reanudar conversiones, cancelar y reintentar solo archivos con error.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
-- Filtros por estado, formato y peso original.
+- Filtros por estado, formato, peso original, busqueda por nombre/ruta y orden por nombre, peso, formato, estado o tamano.
 - Deteccion de duplicados por contenido al agregar archivos o carpetas.
+- Vista previa de rutas de salida antes de convertir.
+- Guardado y restauracion automatica de la sesion de cola.
 - Avisos visuales en detalle para RAW, transparencia, animados, archivos pesados o problemas.
-- Reportes TXT y CSV al terminar cada conversion.
+- Reportes TXT, CSV y HTML al terminar cada conversion.
+- ZIP final opcional con todos los archivos generados.
 - Presets para web, Instagram, WhatsApp, impresion, producto, SVG, fondo transparente, ahorro maximo, sin perdida, ICO y PDF.
 - Autodeteccion por contenido para imagenes sin extension o con extension no estandar.
 - Importacion de RAW de camara mediante `rawpy`/LibRaw.
@@ -33,7 +36,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Quitar fondo mejorado con deteccion desde mas puntos del borde, sin modelos pesados de IA.
 - Suavizado configurable del borde al quitar fondo.
 - Salida SVG vectorial simplificada y mas compacta para logos e ilustraciones.
-- Edicion basica por lote: rotar, voltear, recortar bordes y crear lienzo cuadrado.
+- Edicion basica por lote: rotar, voltear, recortar bordes, ajustar brillo/contraste/saturacion y crear lienzo cuadrado.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
 - Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
 - Reordenar la cola con botones para subir y bajar imagenes.
@@ -55,6 +58,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Ajustes rapidos: web, maxima calidad, reducir peso, icono ICO y PDF desde imagenes.
 - Perfiles personalizados guardados en el equipo.
 - Importacion y exportacion de perfiles en JSON.
+- Exportacion de un solo perfil, perfiles default integrados y restauracion rapida de ajustes.
 - Importacion y exportacion de ajustes completos en JSON.
 - Ajustes guardados automaticamente en `%APPDATA%\Converter\settings.json`.
 - Logs persistentes en `%APPDATA%\Converter\converter.log`.
@@ -66,6 +70,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Tooltips y guia integrada para explicar cada opcion de salida.
 - Menu contextual opcional de Windows para abrir archivos o carpetas desde clic derecho.
 - Menu contextual opcional tambien desde el instalador.
+- PDF con tamano de pagina Original, A4 o Carta y orientacion automatica.
 - Modo CLI: convierte desde terminal con `Converter.exe archivo.png --to webp`.
 - Modo portable creando `portable.flag` junto al ejecutable.
 - Campos contextuales: las opciones que no aplican se desactivan automaticamente.
@@ -120,8 +125,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.7
-git push origin v1.3.7
+git tag v1.3.8
+git push origin v1.3.8
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.

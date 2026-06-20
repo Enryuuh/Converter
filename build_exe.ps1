@@ -21,6 +21,9 @@ if (-not (Test-Path $pythonExe)) {
   --icon "assets\converter-logo.ico" `
   --name "Converter" `
   app.py
+if ($LASTEXITCODE -ne 0) {
+  throw "PyInstaller failed with exit code $LASTEXITCODE."
+}
 
 Write-Host ""
 Write-Host "EXE creado en: dist\Converter.exe"

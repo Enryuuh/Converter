@@ -6,10 +6,13 @@ if (-not $iscc) {
 }
 
 if (-not $env:APP_VERSION) {
-  $env:APP_VERSION = "1.3.7"
+  $env:APP_VERSION = "1.3.8"
 }
 
 & $iscc.Source ".\installer\Converter.iss"
+if ($LASTEXITCODE -ne 0) {
+  throw "Inno Setup failed with exit code $LASTEXITCODE."
+}
 
 Write-Host ""
 Write-Host "Instalador creado en: dist\ConverterSetup.exe"
