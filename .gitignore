@@ -12,4 +12,5 @@ dist/*.exe
 # Local environment files.
 .env
 .venv/
+.venv-build/
 venv/

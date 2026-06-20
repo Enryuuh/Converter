@@ -1,8 +1,16 @@
 $ErrorActionPreference = "Stop"
 
-python -m pip install -r requirements.txt
+$venvPath = ".venv-build"
+$pythonExe = Join-Path $venvPath "Scripts\python.exe"
 
-python -m PyInstaller `
+if (-not (Test-Path $pythonExe)) {
+  python -m venv $venvPath
+}
+
+& $pythonExe -m pip install --upgrade pip
+& $pythonExe -m pip install -r requirements.txt
+
+& $pythonExe -m PyInstaller `
   --noconfirm `
   --clean `
   --onefile `

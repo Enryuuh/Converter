@@ -29,6 +29,9 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 - Interfaz moderna con logo propio y nombre `Converter`.
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
+- Carga de metadatos en segundo plano para no congelar la interfaz con carpetas grandes.
+- Build aislado en `.venv-build` para evitar empaquetar dependencias globales innecesarias.
+- Compresion por peso objetivo optimizada con busqueda binaria de calidad.
 
 ## Crear el .exe
 
@@ -43,6 +46,8 @@ El ejecutable queda en:
 ```text
 dist\Converter.exe
 ```
+
+El build usa un entorno virtual local `.venv-build` para generar un binario mas limpio y consistente.
 
 ## Crear instalador
 

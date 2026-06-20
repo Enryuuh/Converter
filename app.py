@@ -15,7 +15,7 @@ from tkinter import colorchooser, filedialog, messagebox, simpledialog
 import tkinter as tk
 from tkinter import ttk
 
-from PIL import Image, ImageColor, ImageSequence, ImageTk, UnidentifiedImageError
+from PIL import Image, ImageColor, ImageOps, ImageSequence, ImageTk, UnidentifiedImageError
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -36,7 +36,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -110,6 +110,14 @@ def is_supported_image(path: Path) -> bool:
     return path.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
 
 
+def parse_version(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in version.strip().lstrip("v").split("."):
+        digits = "".join(char for char in part if char.isdigit())
+        parts.append(int(digits or 0))
+    return tuple(parts)
+
+
 def describe_image(path: Path) -> tuple[str, str, str, str]:
     try:
         with Image.open(path) as image:
@@ -152,10 +160,15 @@ def build_output_path(source: Path, output_dir: Path, options: ConversionOptions
         stem = f"{safe_name_part(options.prefix)}{stem}{safe_name_part(options.suffix)}"
 
     candidate = output_dir / f"{stem}{suffix}"
+    counter = 1
     if options.overwrite:
+        if reserved is not None:
+            while candidate in reserved:
+                candidate = output_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+            reserved.add(candidate)
         return candidate
 
-    counter = 1
     while candidate.exists() or (reserved is not None and candidate in reserved):
         candidate = output_dir / f"{stem}_{counter}{suffix}"
         counter += 1
@@ -228,60 +241,96 @@ def build_save_kwargs(options: ConversionOptions, quality_override: int | None =
     return save_kwargs
 
 
+def prepared_frames_from_source(source: Path, options: ConversionOptions) -> tuple[list[Image.Image], bool, dict]:
+    with Image.open(source) as image:
+        preserve_frames = getattr(image, "is_animated", False) and options.output_format in {"GIF", "WEBP", "TIFF", "PDF"}
+        source_info = {
+            "duration": image.info.get("duration", 100),
+            "loop": image.info.get("loop", 0),
+        }
+        if preserve_frames:
+            frames = [prepare_frame(frame, options) for frame in ImageSequence.Iterator(image)]
+        else:
+            oriented = ImageOps.exif_transpose(image)
+            frames = [prepare_frame(oriented, options)]
+    return frames, preserve_frames, source_info
+
+
+def save_prepared_frames(
+    frames: list[Image.Image],
+    destination: Path | io.BytesIO,
+    options: ConversionOptions,
+    preserve_frames: bool,
+    source_info: dict,
+    quality_override: int | None = None,
+) -> Path | io.BytesIO:
+    save_format = OUTPUT_FORMATS[options.output_format]["save_format"]
+    save_kwargs = build_save_kwargs(options, quality_override)
+    first = frames[0]
+
+    if preserve_frames and len(frames) > 1:
+        save_kwargs["save_all"] = True
+        save_kwargs["append_images"] = frames[1:]
+        if options.output_format in {"GIF", "WEBP"}:
+            save_kwargs["duration"] = source_info.get("duration", 100)
+            save_kwargs["loop"] = source_info.get("loop", 0)
+
+    first.save(destination, save_format, **save_kwargs)
+    return destination
+
+
 def converted_first_frame(source: Path, options: ConversionOptions) -> Image.Image:
     with Image.open(source) as image:
-        return prepare_frame(image, options)
+        return prepare_frame(ImageOps.exif_transpose(image), options)
 
 
 def estimate_output_size(source: Path, options: ConversionOptions) -> int:
-    save_format = OUTPUT_FORMATS[options.output_format]["save_format"]
-    with Image.open(source) as image:
-        frame = prepare_frame(image, options)
+    frames, preserve_frames, source_info = prepared_frames_from_source(source, options)
     buffer = io.BytesIO()
-    frame.save(buffer, save_format, **build_save_kwargs(options))
+    save_prepared_frames(frames, buffer, options, preserve_frames, source_info)
     return len(buffer.getvalue())
 
 
 def convert_image(source: Path, destination: Path, options: ConversionOptions, quality_override: int | None = None) -> Path:
-    save_format = OUTPUT_FORMATS[options.output_format]["save_format"]
-
-    with Image.open(source) as image:
-        preserve_frames = getattr(image, "is_animated", False) and options.output_format in {"GIF", "WEBP", "TIFF", "PDF"}
-        if preserve_frames:
-            frames = [prepare_frame(frame, options) for frame in ImageSequence.Iterator(image)]
-        else:
-            frames = [prepare_frame(image, options)]
-        first = frames[0]
-
-        save_kwargs = build_save_kwargs(options, quality_override)
-
-        if preserve_frames and len(frames) > 1:
-            save_kwargs["save_all"] = True
-            save_kwargs["append_images"] = frames[1:]
-            if options.output_format in {"GIF", "WEBP"}:
-                save_kwargs["duration"] = image.info.get("duration", 100)
-                save_kwargs["loop"] = image.info.get("loop", 0)
-
-        first.save(destination, save_format, **save_kwargs)
+    frames, preserve_frames, source_info = prepared_frames_from_source(source, options)
+    save_prepared_frames(frames, destination, options, preserve_frames, source_info, quality_override)
     return destination
 
 
 def convert_image_optimized(source: Path, destination: Path, options: ConversionOptions) -> Path:
-    convert_image(source, destination, options)
-    if not options.target_size_enabled or not options.target_size_kb:
-        return destination
-    if not OUTPUT_FORMATS[options.output_format]["quality"]:
+    if not options.target_size_enabled or not options.target_size_kb or not OUTPUT_FORMATS[options.output_format]["quality"]:
+        convert_image(source, destination, options)
         return destination
 
+    frames, preserve_frames, source_info = prepared_frames_from_source(source, options)
+    save_prepared_frames(frames, destination, options, preserve_frames, source_info)
     target_bytes = options.target_size_kb * 1024
     if destination.stat().st_size <= target_bytes:
         return destination
 
-    starting_quality = min(options.quality, 92)
-    for quality in range(starting_quality, 14, -7):
-        convert_image(source, destination, replace(options, quality=quality), quality_override=quality)
-        if destination.stat().st_size <= target_bytes:
-            break
+    low = 15
+    high = min(options.quality, 95)
+    best_bytes: bytes | None = None
+    best_quality = low
+
+    while low <= high:
+        quality = (low + high) // 2
+        buffer = io.BytesIO()
+        save_prepared_frames(frames, buffer, replace(options, quality=quality), preserve_frames, source_info, quality)
+        payload = buffer.getvalue()
+        if len(payload) <= target_bytes:
+            best_bytes = payload
+            best_quality = quality
+            low = quality + 1
+        else:
+            high = quality - 1
+
+    if best_bytes is None:
+        buffer = io.BytesIO()
+        save_prepared_frames(frames, buffer, replace(options, quality=best_quality), preserve_frames, source_info, best_quality)
+        best_bytes = buffer.getvalue()
+
+    destination.write_bytes(best_bytes)
     return destination
 
 
@@ -289,7 +338,7 @@ def combine_images_to_pdf(files: list[Path], destination: Path, options: Convers
     pages: list[Image.Image] = []
     for source in files:
         with Image.open(source) as image:
-            first_frame = next(ImageSequence.Iterator(image))
+            first_frame = ImageOps.exif_transpose(next(ImageSequence.Iterator(image)))
             pages.append(flatten_alpha(resize_image(first_frame, options), options.background))
 
     if not pages:
@@ -743,28 +792,46 @@ class ImageConverterApp(TkBase):
     def add_folder(self) -> None:
         folder = filedialog.askdirectory(title="Selecciona una carpeta con imagenes")
         if folder:
-            self._add_paths(self._iter_images(Path(folder)))
+            self._add_drop_paths([Path(folder)])
 
     def handle_drop(self, event) -> None:
         paths = [Path(path) for path in self.tk.splitlist(event.data)]
+        self._add_drop_paths(paths)
+
+    def _iter_images(self, folder: Path):
+        yield from (path for path in folder.rglob("*") if path.is_file() and is_supported_image(path))
+
+    def _add_drop_paths(self, paths: list[Path]) -> None:
+        self.status.set("Escaneando archivos...")
+        thread = threading.Thread(target=self._expand_and_add_paths_worker, args=(paths,), daemon=True)
+        thread.start()
+
+    def _expand_and_add_paths_worker(self, paths: list[Path]) -> None:
         expanded_paths: list[Path] = []
         for path in paths:
             if path.is_dir():
                 expanded_paths.extend(self._iter_images(path))
             else:
                 expanded_paths.append(path)
-        self._add_paths(expanded_paths)
-
-    def _iter_images(self, folder: Path):
-        yield from (path for path in folder.rglob("*") if path.is_file() and is_supported_image(path))
+        self._scan_paths(expanded_paths)
 
     def _add_paths(self, paths) -> None:
+        self.status.set("Leyendo metadatos...")
+        thread = threading.Thread(target=self._scan_paths, args=(list(paths),), daemon=True)
+        thread.start()
+
+    def _scan_paths(self, paths: list[Path]) -> None:
         existing = {path.resolve() for path in self.files}
+        entries: list[tuple[Path, tuple[str, str, str, str]]] = []
         added = 0
         rejected = 0
 
         for path in paths:
-            resolved = path.resolve()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                rejected += 1
+                continue
             if not resolved.is_file() or not is_supported_image(resolved):
                 rejected += 1
                 continue
@@ -775,6 +842,17 @@ class ImageConverterApp(TkBase):
             if metadata is None:
                 metadata = describe_image(resolved)
                 self.metadata_cache[resolved] = metadata
+            existing.add(resolved)
+            entries.append((resolved, metadata))
+            added += 1
+
+        self.after(0, lambda: self._insert_scanned_paths(entries, added, rejected))
+
+    def _insert_scanned_paths(self, entries: list[tuple[Path, tuple[str, str, str, str]]], added: int, rejected: int) -> None:
+        existing = set(self.files)
+        for resolved, metadata in entries:
+            if resolved in existing:
+                continue
             image_format, dimensions, details, weight = metadata
             self.files.append(resolved)
             existing.add(resolved)
@@ -784,7 +862,6 @@ class ImageConverterApp(TkBase):
                 iid=str(resolved),
                 values=(resolved.name, image_format, dimensions, weight, details, str(resolved.parent)),
             )
-            added += 1
 
         self.status.set(f"{len(self.files)} imagen(es) listas. Agregadas: {added}. Rechazadas: {rejected}.")
         if added and not self.file_tree.selection():
@@ -819,6 +896,8 @@ class ImageConverterApp(TkBase):
         self.preview_canvas.delete("all")
         try:
             with Image.open(path) as image:
+                image.draft("RGB", (410, 240))
+                image = ImageOps.exif_transpose(image)
                 image.thumbnail((410, 240), Image.Resampling.LANCZOS)
                 preview = image.convert("RGBA")
                 self.preview_image = ImageTk.PhotoImage(preview)
@@ -864,8 +943,10 @@ class ImageConverterApp(TkBase):
         path = Path(selected[0])
         try:
             with Image.open(path) as image:
-                original = image.convert("RGBA")
+                image.draft("RGB", (190, 190))
+                original = ImageOps.exif_transpose(image)
                 original.thumbnail((190, 190), Image.Resampling.LANCZOS)
+                original = original.convert("RGBA")
             output = converted_first_frame(path, options).convert("RGBA")
             output.thumbnail((190, 190), Image.Resampling.LANCZOS)
 
@@ -978,7 +1059,7 @@ class ImageConverterApp(TkBase):
             return
 
         def notify() -> None:
-            if latest and latest != APP_VERSION:
+            if latest and parse_version(latest) > parse_version(APP_VERSION):
                 if messagebox.askyesno(APP_NAME, f"Hay una nueva version: v{latest}.\n\n¿Abrir pagina de descarga?"):
                     webbrowser.open(html_url)
                 self.status.set(f"Actualizacion disponible: v{latest}")
@@ -1038,10 +1119,13 @@ class ImageConverterApp(TkBase):
             width = int(self.resize_width.get()) if self.resize_width.get().strip() else None
             height = int(self.resize_height.get()) if self.resize_height.get().strip() else None
             target_size = int(self.target_size_kb.get()) if self.target_size_kb.get().strip() else None
+            max_workers = int(self.max_workers.get())
             if width is not None and width <= 0 or height is not None and height <= 0:
                 raise ValueError("El ancho y alto deben ser mayores a cero.")
             if target_size is not None and target_size <= 0:
                 raise ValueError("El peso objetivo debe ser mayor a cero.")
+            if max_workers <= 0:
+                raise ValueError("La cantidad de procesos debe ser mayor a cero.")
         except ValueError as exc:
             messagebox.showerror(APP_NAME, f"Opcion invalida:\n{exc}")
             return None
@@ -1062,7 +1146,7 @@ class ImageConverterApp(TkBase):
             combine_pdf=self.combine_pdf.get(),
             target_size_enabled=self.target_size_enabled.get(),
             target_size_kb=target_size,
-            max_workers=max(1, int(self.max_workers.get())),
+            max_workers=max(1, max_workers),
         )
 
     def start_conversion(self) -> None:
@@ -1114,10 +1198,7 @@ class ImageConverterApp(TkBase):
                 total = len(files)
                 completed = 0
                 reserved_outputs: set[Path] = set()
-                jobs = [
-                    (index, source, build_output_path(source, options.output_dir, options, index, reserved_outputs))
-                    for index, source in enumerate(files, start=1)
-                ]
+                job_iter = iter(enumerate(files, start=1))
 
                 def convert_one(index: int, source: Path, destination: Path) -> tuple[bool, Path | None, str | None]:
                     if self.cancel_event.is_set():
@@ -1130,12 +1211,27 @@ class ImageConverterApp(TkBase):
 
                 max_workers = min(options.max_workers, total)
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_map = {
-                        executor.submit(convert_one, index, source, destination): (index, source)
-                        for index, source, destination in jobs
-                    }
-                    for future in concurrent.futures.as_completed(future_map):
-                        index, source = future_map[future]
+                    future_map: dict[concurrent.futures.Future, tuple[int, Path]] = {}
+
+                    def submit_next() -> bool:
+                        try:
+                            index, source = next(job_iter)
+                        except StopIteration:
+                            return False
+                        destination = build_output_path(source, options.output_dir, options, index, reserved_outputs)
+                        future_map[executor.submit(convert_one, index, source, destination)] = (index, source)
+                        return True
+
+                    for _ in range(max_workers):
+                        submit_next()
+
+                    while future_map:
+                        done, _pending = concurrent.futures.wait(
+                            future_map,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        future = done.pop()
+                        index, source = future_map.pop(future)
                         if self.cancel_event.is_set():
                             cancelled = True
                         self._set_status(f"Procesando {min(completed + 1, total)}/{total}: {source.name}")
@@ -1152,6 +1248,7 @@ class ImageConverterApp(TkBase):
                                 pending.cancel()
                             cancelled = True
                             break
+                        submit_next()
         finally:
             self.after(0, lambda: self.convert_button.configure(state=tk.NORMAL))
             self.after(0, lambda: self.cancel_button.configure(state=tk.DISABLED))

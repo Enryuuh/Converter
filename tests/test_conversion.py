@@ -10,6 +10,7 @@ from app import (
     combine_images_to_pdf,
     convert_image_optimized,
     flatten_alpha,
+    parse_version,
     resize_image,
 )
 
@@ -53,6 +54,24 @@ class ConversionTests(unittest.TestCase):
             self.assertEqual(first.name, "photo.webp")
             self.assertEqual(second.name, "photo_1.webp")
 
+    def test_build_output_path_reserves_duplicates_when_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            source = output_dir / "photo.png"
+            source.touch()
+            options = make_options(output_dir=output_dir, overwrite=True)
+            reserved = set()
+
+            first = build_output_path(source, output_dir, options, 1, reserved)
+            second = build_output_path(source, output_dir, options, 2, reserved)
+
+            self.assertNotEqual(first, second)
+            self.assertEqual(first.name, "photo.webp")
+            self.assertEqual(second.name, "photo_1.webp")
+
+    def test_parse_version_compares_semantic_versions(self):
+        self.assertGreater(parse_version("v1.10.0"), parse_version("1.2.9"))
+
     def test_resize_keeps_aspect_ratio(self):
         image = Image.new("RGB", (200, 100), "blue")
         options = make_options(resize_enabled=True, width=100)
@@ -81,6 +100,20 @@ class ConversionTests(unittest.TestCase):
 
             self.assertTrue(destination.exists())
             self.assertGreater(destination.stat().st_size, 0)
+
+    def test_convert_image_optimized_respects_target_size_when_possible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            source = output_dir / "source.png"
+            destination = output_dir / "source.webp"
+            image = Image.effect_noise((256, 256), 80).convert("RGB")
+            image.save(source)
+            options = make_options(output_dir=output_dir, quality=90, target_size_enabled=True, target_size_kb=30)
+
+            convert_image_optimized(source, destination, options)
+
+            self.assertTrue(destination.exists())
+            self.assertLessEqual(destination.stat().st_size, 30 * 1024)
 
     def test_combine_images_to_pdf(self):
         with tempfile.TemporaryDirectory() as tmp:
