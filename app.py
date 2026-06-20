@@ -451,31 +451,78 @@ class ImageConverterApp(TkBase):
         style.configure("Card.TLabel", background=self.colors["surface"], foreground=self.colors["text"], font=("Segoe UI", 10))
         style.configure("Muted.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=("Segoe UI", 9))
         style.configure("CardMuted.TLabel", background=self.colors["surface"], foreground=self.colors["muted"], font=("Segoe UI", 9))
+        control_bg = self.colors["input"]
+        control_disabled_bg = self.colors["surface_soft"]
+        control_fg = self.colors["text"]
+        control_disabled_fg = self.colors["muted"]
         style.configure(
             "TCombobox",
             padding=6,
-            fieldbackground=self.colors["input"],
-            background=self.colors["input"],
-            foreground=self.colors["text"],
-            arrowcolor=self.colors["muted"],
+            arrowsize=14,
+            fieldbackground=control_bg,
+            background=control_bg,
+            foreground=control_fg,
+            arrowcolor=control_fg,
+            bordercolor=self.colors["line"],
+            lightcolor=self.colors["line"],
+            darkcolor=self.colors["line"],
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", control_bg), ("disabled", control_disabled_bg), ("!disabled", control_bg)],
+            foreground=[("disabled", control_disabled_fg), ("readonly", control_fg), ("!disabled", control_fg)],
+            background=[("active", self.colors["ghost_active"]), ("disabled", control_disabled_bg), ("readonly", control_bg), ("!disabled", control_bg)],
+            arrowcolor=[("disabled", control_disabled_fg), ("active", control_fg), ("!disabled", control_fg)],
+            selectbackground=[("readonly", control_bg), ("!disabled", self.colors["tree_selected"])],
+            selectforeground=[("readonly", control_fg), ("!disabled", control_fg)],
         )
         style.configure(
             "TEntry",
             padding=6,
-            fieldbackground=self.colors["input"],
-            foreground=self.colors["text"],
-            insertcolor=self.colors["text"],
+            fieldbackground=control_bg,
+            foreground=control_fg,
+            insertcolor=control_fg,
+            bordercolor=self.colors["line"],
+            lightcolor=self.colors["line"],
+            darkcolor=self.colors["line"],
+        )
+        style.map(
+            "TEntry",
+            fieldbackground=[("disabled", control_disabled_bg), ("readonly", control_bg), ("!disabled", control_bg)],
+            foreground=[("disabled", control_disabled_fg), ("readonly", control_fg), ("!disabled", control_fg)],
+            selectbackground=[("!disabled", self.colors["tree_selected"])],
+            selectforeground=[("!disabled", control_fg)],
         )
         style.configure("Treeview", rowheight=34, background=self.colors["surface"], fieldbackground=self.colors["surface"], borderwidth=0)
         style.configure(
             "Treeview.Heading",
-            padding=(10, 10),
+            padding=(8, 4),
             background=self.colors["tree_heading"],
             foreground=self.colors["text"],
+            bordercolor=self.colors["line"],
+            relief="flat",
             font=("Segoe UI", 9, "bold"),
         )
         style.map("Treeview", background=[("selected", self.colors["tree_selected"])], foreground=[("selected", self.colors["text"])])
+        style.map(
+            "Treeview.Heading",
+            background=[("active", self.colors["ghost_active"]), ("!active", self.colors["tree_heading"])],
+            foreground=[("active", self.colors["text"]), ("!active", self.colors["text"])],
+        )
         style.configure("Horizontal.TProgressbar", troughcolor=self.colors["line"], background=self.colors["primary"], bordercolor=self.colors["line"])
+        style.configure(
+            "Horizontal.TScale",
+            background=self.colors["surface"],
+            troughcolor=self.colors["line"],
+            bordercolor=self.colors["line"],
+            lightcolor=self.colors["line"],
+            darkcolor=self.colors["line"],
+        )
+        style.map("Horizontal.TScale", background=[("active", self.colors["surface"])])
+        self.option_add("*TCombobox*Listbox.background", control_bg)
+        self.option_add("*TCombobox*Listbox.foreground", control_fg)
+        self.option_add("*TCombobox*Listbox.selectBackground", self.colors["tree_selected"])
+        self.option_add("*TCombobox*Listbox.selectForeground", control_fg)
 
         header = tk.Frame(self, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
         header.grid(row=0, column=0, sticky="ew")
@@ -573,7 +620,7 @@ class ImageConverterApp(TkBase):
             "details": "Detalle",
             "path": "Ruta",
         }
-        widths = {"name": 230, "format": 78, "dimensions": 110, "weight": 86, "details": 170, "path": 280}
+        widths = {"name": 210, "format": 74, "dimensions": 96, "weight": 78, "details": 150, "path": 178}
         for column, heading in headings.items():
             self.file_tree.heading(column, text=heading)
             self.file_tree.column(column, width=widths[column], minwidth=70, anchor="center" if column != "path" else "w")
@@ -689,7 +736,7 @@ class ImageConverterApp(TkBase):
             options,
             textvariable=self.background_hex,
             bg=self.background_hex.get(),
-            fg=self.colors["text"],
+            fg=self._text_color_for_background(self.background_hex.get()),
             width=10,
             relief="solid",
             bd=1,
@@ -733,7 +780,13 @@ class ImageConverterApp(TkBase):
             width=5,
             bg=self.colors["input"],
             fg=self.colors["text"],
+            disabledbackground=self.colors["surface_soft"],
+            disabledforeground=self.colors["muted"],
+            insertbackground=self.colors["text"],
             buttonbackground=self.colors["ghost"],
+            highlightbackground=self.colors["line"],
+            highlightcolor=self.colors["primary"],
+            highlightthickness=1,
             relief="solid",
             bd=1,
             font=("Segoe UI", 9),
@@ -758,6 +811,19 @@ class ImageConverterApp(TkBase):
     def _field_label(self, parent, text: str) -> tk.Label:
         return tk.Label(parent, text=text, bg=self.colors["surface"], fg=self.colors["muted"], font=("Segoe UI", 9, "bold"))
 
+    def _text_color_for_background(self, color: str) -> str:
+        try:
+            red, green, blue = ImageColor.getrgb(color)[:3]
+        except ValueError:
+            return self.colors["text"]
+        luminance = (red * 299 + green * 587 + blue * 114) / 1000
+        return "#0f172a" if luminance >= 150 else "#f8fafc"
+
+    def _refresh_color_swatch(self) -> None:
+        if hasattr(self, "color_swatch"):
+            color = self.background_hex.get()
+            self.color_swatch.configure(bg=color, fg=self._text_color_for_background(color))
+
     def _check(self, parent, text: str, variable: tk.BooleanVar) -> tk.Checkbutton:
         return tk.Checkbutton(
             parent,
@@ -767,7 +833,7 @@ class ImageConverterApp(TkBase):
             fg=self.colors["text"],
             activebackground=self.colors["surface"],
             activeforeground=self.colors["text"],
-            selectcolor=self.colors["surface"],
+            selectcolor=self.colors["input"],
             font=("Segoe UI", 9),
             bd=0,
             highlightthickness=0,
@@ -776,7 +842,7 @@ class ImageConverterApp(TkBase):
     def _button(self, parent, text: str, command, variant: str = "secondary") -> tk.Button:
         palette = {
             "primary": (self.colors["primary"], "#ffffff", self.colors["primary_dark"]),
-            "secondary": (self.colors["surface_soft"], self.colors["text"], "#e2e8f0"),
+            "secondary": (self.colors["surface_soft"], self.colors["text"], self.colors["ghost_active"]),
             "ghost": (self.colors["ghost"], self.colors["text"], self.colors["ghost_active"]),
         }
         bg, fg, active = palette[variant]
@@ -1028,7 +1094,7 @@ class ImageConverterApp(TkBase):
         color = colorchooser.askcolor(color=self.background_hex.get(), title="Color de fondo para formatos sin transparencia")
         if color and color[1]:
             self.background_hex.set(color[1])
-            self.color_swatch.configure(bg=color[1])
+            self._refresh_color_swatch()
 
     def preview_output(self) -> None:
         selected = self.file_tree.selection()
@@ -1129,7 +1195,7 @@ class ImageConverterApp(TkBase):
         self.resize_height.set(data.get("resize_height", ""))
         self.keep_aspect.set(data.get("keep_aspect", True))
         self.background_hex.set(data.get("background_hex", "#ffffff"))
-        self.color_swatch.configure(bg=self.background_hex.get())
+        self._refresh_color_swatch()
         self.naming_mode.set(data.get("naming_mode", "Conservar"))
         self.prefix.set(data.get("prefix", ""))
         self.suffix.set(data.get("suffix", ""))
@@ -1212,14 +1278,14 @@ class ImageConverterApp(TkBase):
             self.combine_pdf.set(True)
             self.resize_enabled.set(False)
             self.background_hex.set("#ffffff")
-            self.color_swatch.configure(bg="#ffffff")
+            self._refresh_color_swatch()
         self._refresh_quality_state()
 
     def _refresh_quality_state(self) -> None:
         enabled = OUTPUT_FORMATS[self.output_format.get()]["quality"]
         state = tk.NORMAL if enabled else tk.DISABLED
         self.quality_scale.configure(state=state)
-        self.quality_label.configure(foreground="#202938" if enabled else "#98a2b3")
+        self.quality_label.configure(foreground=self.colors["text"] if enabled else self.colors["muted"])
 
     def _read_options(self) -> ConversionOptions | None:
         try:
