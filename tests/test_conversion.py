@@ -12,6 +12,7 @@ from app import (
     convert_image_optimized,
     format_conversion_summary,
     flatten_alpha,
+    is_supported_image,
     parse_output_formats,
     parse_version,
     resize_image,
@@ -83,6 +84,24 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(parse_output_formats("WEBP", "png, jpg, WEBP"), ("WEBP", "PNG", "JPG"))
         with self.assertRaises(ValueError):
             parse_output_formats("WEBP", "not-real")
+
+    def test_supported_image_detects_unknown_extension_by_content(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            png_source = folder / "camera_export.data"
+            jpeg_source = folder / "camera_export"
+            Image.new("RGB", (12, 10), "green").save(png_source, format="PNG")
+            Image.new("RGB", (12, 10), "blue").save(jpeg_source, format="JPEG")
+
+            self.assertTrue(is_supported_image(png_source))
+            self.assertTrue(is_supported_image(jpeg_source))
+
+    def test_supported_image_rejects_non_image_unknown_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "notes.data"
+            source.write_text("not an image", encoding="utf-8")
+
+            self.assertFalse(is_supported_image(source))
 
     def test_format_conversion_summary_reports_savings(self):
         self.assertIn("50.0% menos", format_conversion_summary(2000, 1000))

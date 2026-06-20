@@ -38,7 +38,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -53,9 +53,12 @@ LOG_PATH = CONFIG_DIR / "converter.log"
 SUPPORTED_INPUT_EXTENSIONS = {
     ".jpg",
     ".jpeg",
+    ".jpe",
+    ".jfif",
     ".png",
     ".webp",
     ".bmp",
+    ".dib",
     ".gif",
     ".tif",
     ".tiff",
@@ -84,7 +87,7 @@ OUTPUT_FORMATS = {
 INPUT_FILE_TYPES = [
     (
         "Imagenes",
-        "*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tif *.tiff *.ico *.heic *.heif *.ppm *.pgm *.pbm *.avif",
+        "*.jpg *.jpeg *.jpe *.jfif *.png *.webp *.bmp *.dib *.gif *.tif *.tiff *.ico *.heic *.heif *.ppm *.pgm *.pbm *.avif",
     ),
     ("Todos los archivos", "*.*"),
 ]
@@ -114,7 +117,17 @@ class ConversionOptions:
 
 
 def is_supported_image(path: Path) -> bool:
-    return path.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS
+    if path.suffix.lower() in SUPPORTED_INPUT_EXTENSIONS:
+        return True
+    return can_identify_image(path)
+
+
+def can_identify_image(path: Path) -> bool:
+    try:
+        with Image.open(path) as image:
+            return bool(image.format)
+    except (OSError, SyntaxError, ValueError, UnidentifiedImageError):
+        return False
 
 
 def parse_version(version: str) -> tuple[int, ...]:
@@ -1204,7 +1217,7 @@ class ImageConverterApp(TkBase):
         yield from (path for path in folder.rglob("*") if path.is_file() and is_supported_image(path))
 
     def _add_drop_paths(self, paths: list[Path]) -> None:
-        self.status.set("Escaneando archivos...")
+        self.status.set("Escaneando y autodetectando imagenes...")
         thread = threading.Thread(target=self._expand_and_add_paths_worker, args=(paths,), daemon=True)
         thread.start()
 
@@ -1218,7 +1231,7 @@ class ImageConverterApp(TkBase):
         self._scan_paths(expanded_paths)
 
     def _add_paths(self, paths) -> None:
-        self.status.set("Leyendo metadatos...")
+        self.status.set("Leyendo y autodetectando metadatos...")
         thread = threading.Thread(target=self._scan_paths, args=(list(paths),), daemon=True)
         thread.start()
 

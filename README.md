@@ -6,7 +6,8 @@ PNG, JPG, JPEG, WEBP, AVIF, BMP, TIFF, GIF, ICO y PDF.
 Descarga la version para Windows desde [GitHub Releases](https://github.com/Enryuuh/Converter/releases/latest).
 
 Permite agregar imagenes con botones o arrastrando archivos/carpetas a la zona superior.
-La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo.
+Al agregar carpetas, detecta imagenes por extension y tambien por contenido cuando el archivo viene sin extension o con una extension rara.
+La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada archivo.
 
 ## Funciones
 
@@ -14,6 +15,7 @@ La tabla muestra el tipo detectado, tamano, modo de color y ruta de cada archivo
 - Comparacion antes/despues con peso estimado de salida.
 - Estimacion de peso para todo el lote antes de convertir.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
+- Autodeteccion por contenido para imagenes sin extension o con extension no estandar.
 - Feedback de formato real, dimensiones, peso, transparencia y frames animados.
 - Estado por archivo en la cola: pendiente, procesando, OK, error o cancelado.
 - Reordenar la cola con botones para subir y bajar imagenes.
@@ -90,8 +92,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.1
-git push origin v1.3.1
+git tag v1.3.2
+git push origin v1.3.2
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
