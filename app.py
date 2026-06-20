@@ -38,7 +38,7 @@ except Exception:
 
 
 APP_NAME = "Converter"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 GITHUB_REPO = "Enryuuh/Converter"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -164,6 +164,18 @@ def format_conversion_summary(input_bytes: int, output_bytes: int) -> str:
     if difference < 0:
         return f"{format_size(input_bytes)} -> {format_size(output_bytes)} ({percent:.1f}% mas)"
     return f"{format_size(input_bytes)} -> {format_size(output_bytes)} (sin cambio)"
+
+
+def format_output_estimate_summary(input_bytes: int, estimates: list[tuple[str, int]]) -> str:
+    if not estimates:
+        return "Peso estimado de salida: sin formatos seleccionados."
+    if len(estimates) == 1:
+        output_format, output_bytes = estimates[0]
+        return f"Peso estimado de salida: {output_format} {format_conversion_summary(input_bytes, output_bytes)}"
+
+    parts = [f"{output_format} {format_size(output_bytes)}" for output_format, output_bytes in estimates]
+    total_bytes = sum(output_bytes for _output_format, output_bytes in estimates)
+    return f"Peso estimado de salida: {', '.join(parts)} | Total por foto {format_size(total_bytes)}"
 
 
 def append_log(message: str) -> None:
@@ -497,6 +509,8 @@ class ImageConverterApp(TkBase):
         self.preview_image: ImageTk.PhotoImage | None = None
         self.preview_images: list[ImageTk.PhotoImage] = []
         self.preview_request_id = 0
+        self.preview_estimate_request_id = 0
+        self.preview_estimate_after_id: str | None = None
         self.cancel_event = threading.Event()
         self.profiles: dict[str, dict] = self._load_profiles()
         self.history_entries: list[str] = []
@@ -508,6 +522,7 @@ class ImageConverterApp(TkBase):
         self.quality = tk.IntVar(value=85)
         self.status = tk.StringVar(value="Listo para convertir. Agrega imagenes para empezar.")
         self.preview_info = tk.StringVar(value="Selecciona una imagen para ver detalles y vista previa.")
+        self.preview_estimate_info = tk.StringVar(value="Peso estimado de salida: selecciona una imagen.")
         self.resize_enabled = tk.BooleanVar(value=False)
         self.resize_width = tk.StringVar(value="")
         self.resize_height = tk.StringVar(value="")
@@ -529,8 +544,7 @@ class ImageConverterApp(TkBase):
 
         self._apply_settings(self._load_settings())
         self._build_ui()
-        self.quality.trace_add("write", lambda *_args: self._refresh_option_states() if hasattr(self, "quality_label") else None)
-        self.extra_formats.trace_add("write", lambda *_args: self._refresh_option_states() if hasattr(self, "quality_label") else None)
+        self._bind_output_option_traces()
         self._refresh_option_states()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -805,6 +819,15 @@ class ImageConverterApp(TkBase):
             wraplength=390,
             justify="left",
         ).grid(row=2, column=0, sticky="w", padx=16, pady=(10, 14))
+        tk.Label(
+            preview_frame,
+            textvariable=self.preview_estimate_info,
+            bg=self.colors["surface"],
+            fg=self.colors["primary"],
+            font=("Segoe UI", 9, "bold"),
+            wraplength=390,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", padx=16, pady=(0, 14))
 
         history_frame = self._card(right_panel)
         history_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
@@ -1296,6 +1319,8 @@ class ImageConverterApp(TkBase):
         self.files = [path for path in self.files if path not in selected_paths]
         self.preview_canvas.delete("all")
         self.preview_info.set("Selecciona una imagen para ver la vista previa.")
+        self.preview_estimate_request_id += 1
+        self.preview_estimate_info.set("Peso estimado de salida: selecciona una imagen.")
         self.status.set(f"{len(self.files)} imagen(es) listas.")
 
     def clear_files(self) -> None:
@@ -1307,6 +1332,8 @@ class ImageConverterApp(TkBase):
             self.file_tree.delete(item)
         self.preview_canvas.delete("all")
         self.preview_info.set("Selecciona una imagen para ver la vista previa.")
+        self.preview_estimate_request_id += 1
+        self.preview_estimate_info.set("Peso estimado de salida: selecciona una imagen.")
         self.status.set("Lista limpia.")
 
     def _focus_is_text_input(self) -> bool:
@@ -1396,6 +1423,7 @@ class ImageConverterApp(TkBase):
             "Guia rapida de salida\n\n"
             "Formato: tipo principal que se va a generar.\n"
             "Otros formatos: salidas adicionales, por ejemplo PNG,JPG.\n"
+            "Peso estimado: aparece en la vista previa y cambia al ajustar formato, calidad o tamano.\n"
             "Un solo PDF: une todas las imagenes en un PDF; usa el orden de la cola.\n"
             "Cambiar tamano: activa Ancho/Alto en pixeles.\n"
             "Color fondo: rellena transparencias cuando el formato no las soporta.\n"
@@ -1404,6 +1432,82 @@ class ImageConverterApp(TkBase):
             "Tareas: conversiones paralelas; 2 a 4 suele ser buen valor.\n"
             "Quitar EXIF: elimina metadatos privados como camara, fecha o GPS.",
         )
+
+    def _bind_output_option_traces(self) -> None:
+        variables = (
+            self.output_format,
+            self.extra_formats,
+            self.quality,
+            self.resize_enabled,
+            self.resize_width,
+            self.resize_height,
+            self.keep_aspect,
+            self.background_hex,
+            self.combine_pdf,
+            self.target_size_enabled,
+            self.target_size_kb,
+            self.strip_metadata,
+        )
+        for variable in variables:
+            variable.trace_add("write", self._handle_output_option_change)
+
+    def _handle_output_option_change(self, *_args) -> None:
+        if hasattr(self, "quality_label"):
+            self._refresh_option_states()
+        self._queue_selected_output_estimate()
+
+    def _queue_selected_output_estimate(self, delay_ms: int = 300) -> None:
+        if not hasattr(self, "preview_estimate_info"):
+            return
+        if self.preview_estimate_after_id is not None:
+            try:
+                self.after_cancel(self.preview_estimate_after_id)
+            except tk.TclError:
+                pass
+            self.preview_estimate_after_id = None
+        self.preview_estimate_after_id = self.after(delay_ms, self._start_selected_output_estimate)
+
+    def _start_selected_output_estimate(self) -> None:
+        self.preview_estimate_after_id = None
+        selected = self.file_tree.selection() if hasattr(self, "file_tree") else ()
+        if not selected:
+            self.preview_estimate_info.set("Peso estimado de salida: selecciona una imagen.")
+            return
+
+        options = self._read_options(show_errors=False)
+        if options is None:
+            self.preview_estimate_request_id += 1
+            self.preview_estimate_info.set("Peso estimado de salida: completa opciones validas para calcular.")
+            return
+
+        path = Path(selected[0])
+        self.preview_estimate_request_id += 1
+        request_id = self.preview_estimate_request_id
+        self.preview_estimate_info.set("Peso estimado de salida: calculando...")
+        thread = threading.Thread(target=self._selected_output_estimate_worker, args=(request_id, path, options), daemon=True)
+        thread.start()
+
+    def _selected_output_estimate_worker(self, request_id: int, path: Path, options: ConversionOptions) -> None:
+        try:
+            input_bytes = path.stat().st_size
+            estimates: list[tuple[str, int]] = []
+            for output_format in options.output_formats:
+                format_options = replace(options, output_format=output_format, output_formats=(output_format,), combine_pdf=False)
+                estimates.append((output_format, estimate_final_output_size(path, format_options)))
+            text = format_output_estimate_summary(input_bytes, estimates)
+            if options.combine_pdf and "PDF" in options.output_formats:
+                text += " | PDF unico: usa Estimar lote para el total real."
+        except Exception as exc:
+            text = f"Peso estimado de salida: no se pudo calcular ({exc})."
+        self.after(0, lambda: self._finish_selected_output_estimate(request_id, path, text))
+
+    def _finish_selected_output_estimate(self, request_id: int, path: Path, text: str) -> None:
+        if request_id != self.preview_estimate_request_id:
+            return
+        selected = self.file_tree.selection()
+        if not selected or Path(selected[0]) != path:
+            return
+        self.preview_estimate_info.set(text)
 
     def update_preview(self, _event=None) -> None:
         selected = self.file_tree.selection()
@@ -1426,8 +1530,10 @@ class ImageConverterApp(TkBase):
                 self.metadata_cache[path] = metadata
             image_format, dimensions, details, weight = metadata
             self.preview_info.set(f"{path.name} | {image_format} | {dimensions} | {weight} | {details}")
+            self._queue_selected_output_estimate(120)
         except Exception as exc:
             self.preview_info.set(f"No se pudo previsualizar: {exc}")
+            self.preview_estimate_info.set("Peso estimado de salida: no disponible para esta imagen.")
 
     def choose_output_dir(self) -> None:
         folder = filedialog.askdirectory(title="Selecciona carpeta de salida")
@@ -1825,7 +1931,7 @@ class ImageConverterApp(TkBase):
         if hasattr(self, "color_swatch"):
             self.color_swatch.configure(fg=self._text_color_for_background(self.background_hex.get()))
 
-    def _read_options(self) -> ConversionOptions | None:
+    def _read_options(self, show_errors: bool = True) -> ConversionOptions | None:
         try:
             output_formats = self._selected_output_formats(strict=True)
             background = ImageColor.getrgb(self.background_hex.get())
@@ -1840,7 +1946,8 @@ class ImageConverterApp(TkBase):
             if max_workers <= 0:
                 raise ValueError("La cantidad de procesos debe ser mayor a cero.")
         except ValueError as exc:
-            messagebox.showerror(APP_NAME, f"Opcion invalida:\n{exc}")
+            if show_errors:
+                messagebox.showerror(APP_NAME, f"Opcion invalida:\n{exc}")
             return None
 
         return ConversionOptions(

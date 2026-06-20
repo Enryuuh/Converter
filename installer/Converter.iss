@@ -4,7 +4,7 @@
 #define MyAppURL "https://github.com/Enryuuh/Converter"
 #define MyAppVersion GetEnv("APP_VERSION")
 #if MyAppVersion == ""
-#define MyAppVersion "1.3.2"
+#define MyAppVersion "1.3.3"
 #endif
 
 [Setup]

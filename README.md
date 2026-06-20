@@ -12,6 +12,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 ## Funciones
 
 - Vista previa de la imagen seleccionada.
+- Peso estimado automatico de la imagen seleccionada antes de convertir.
 - Comparacion antes/despues con peso estimado de salida.
 - Estimacion de peso para todo el lote antes de convertir.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
@@ -92,8 +93,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.2
-git push origin v1.3.2
+git tag v1.3.3
+git push origin v1.3.3
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.

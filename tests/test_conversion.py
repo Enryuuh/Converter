@@ -10,7 +10,9 @@ from app import (
     build_output_path,
     combine_images_to_pdf,
     convert_image_optimized,
+    estimate_final_output_size,
     format_conversion_summary,
+    format_output_estimate_summary,
     flatten_alpha,
     is_supported_image,
     parse_output_formats,
@@ -105,6 +107,30 @@ class ConversionTests(unittest.TestCase):
 
     def test_format_conversion_summary_reports_savings(self):
         self.assertIn("50.0% menos", format_conversion_summary(2000, 1000))
+
+    def test_format_output_estimate_summary_reports_single_format(self):
+        summary = format_output_estimate_summary(2000, [("WEBP", 1000)])
+
+        self.assertIn("Peso estimado de salida", summary)
+        self.assertIn("WEBP", summary)
+        self.assertIn("50.0% menos", summary)
+
+    def test_format_output_estimate_summary_reports_multiple_formats(self):
+        summary = format_output_estimate_summary(2000, [("WEBP", 1000), ("PNG", 2500)])
+
+        self.assertIn("WEBP 1000 B", summary)
+        self.assertIn("PNG 2.4 KB", summary)
+        self.assertIn("Total por foto 3.4 KB", summary)
+
+    def test_estimate_final_output_size_returns_predicted_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.png"
+            Image.new("RGB", (80, 60), "purple").save(source)
+            options = make_options(output_format="WEBP", output_formats=("WEBP",), output_dir=Path(tmp))
+
+            estimated_size = estimate_final_output_size(source, options)
+
+            self.assertGreater(estimated_size, 0)
 
     def test_resize_keeps_aspect_ratio(self):
         image = Image.new("RGB", (200, 100), "blue")
