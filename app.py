@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import concurrent.futures
+import io
+import json
 import os
 import sys
 import threading
-from dataclasses import dataclass
+import urllib.error
+import urllib.request
+import webbrowser
+from dataclasses import dataclass, replace
 from pathlib import Path
-from tkinter import colorchooser, filedialog, messagebox
+from tkinter import colorchooser, filedialog, messagebox, simpledialog
 import tkinter as tk
 from tkinter import ttk
 
@@ -30,9 +36,15 @@ except Exception:
 
 
 APP_NAME = "Converter"
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "Enryuuh/Converter"
+LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+LATEST_RELEASE_URL = f"https://github.com/{GITHUB_REPO}/releases/latest"
 BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 LOGO_PNG = BASE_DIR / "assets" / "converter-logo.png"
 LOGO_ICO = BASE_DIR / "assets" / "converter-logo.ico"
+CONFIG_DIR = Path(os.getenv("APPDATA", str(Path.home()))) / "Converter"
+PROFILES_PATH = CONFIG_DIR / "profiles.json"
 
 SUPPORTED_INPUT_EXTENSIONS = {
     ".jpg",
@@ -89,6 +101,9 @@ class ConversionOptions:
     suffix: str
     overwrite: bool
     combine_pdf: bool
+    target_size_enabled: bool
+    target_size_kb: int | None
+    max_workers: int
 
 
 def is_supported_image(path: Path) -> bool:
@@ -128,7 +143,7 @@ def safe_name_part(text: str) -> str:
     return cleaned
 
 
-def build_output_path(source: Path, output_dir: Path, options: ConversionOptions, index: int) -> Path:
+def build_output_path(source: Path, output_dir: Path, options: ConversionOptions, index: int, reserved: set[Path] | None = None) -> Path:
     suffix = OUTPUT_FORMATS[options.output_format]["ext"]
     stem = source.stem
     if options.naming_mode == "Numerado":
@@ -141,9 +156,11 @@ def build_output_path(source: Path, output_dir: Path, options: ConversionOptions
         return candidate
 
     counter = 1
-    while candidate.exists():
+    while candidate.exists() or (reserved is not None and candidate in reserved):
         candidate = output_dir / f"{stem}_{counter}{suffix}"
         counter += 1
+    if reserved is not None:
+        reserved.add(candidate)
     return candidate
 
 
@@ -199,7 +216,33 @@ def prepare_frame(image: Image.Image, options: ConversionOptions) -> Image.Image
     return resized.copy()
 
 
-def convert_image(source: Path, destination: Path, options: ConversionOptions) -> Path:
+def build_save_kwargs(options: ConversionOptions, quality_override: int | None = None) -> dict:
+    save_kwargs = {}
+    if OUTPUT_FORMATS[options.output_format]["quality"]:
+        save_kwargs["quality"] = quality_override if quality_override is not None else options.quality
+        save_kwargs["optimize"] = True
+    if options.output_format == "PNG":
+        save_kwargs["optimize"] = True
+    if options.output_format == "TIFF":
+        save_kwargs["compression"] = "tiff_deflate"
+    return save_kwargs
+
+
+def converted_first_frame(source: Path, options: ConversionOptions) -> Image.Image:
+    with Image.open(source) as image:
+        return prepare_frame(image, options)
+
+
+def estimate_output_size(source: Path, options: ConversionOptions) -> int:
+    save_format = OUTPUT_FORMATS[options.output_format]["save_format"]
+    with Image.open(source) as image:
+        frame = prepare_frame(image, options)
+    buffer = io.BytesIO()
+    frame.save(buffer, save_format, **build_save_kwargs(options))
+    return len(buffer.getvalue())
+
+
+def convert_image(source: Path, destination: Path, options: ConversionOptions, quality_override: int | None = None) -> Path:
     save_format = OUTPUT_FORMATS[options.output_format]["save_format"]
 
     with Image.open(source) as image:
@@ -210,15 +253,7 @@ def convert_image(source: Path, destination: Path, options: ConversionOptions) -
             frames = [prepare_frame(image, options)]
         first = frames[0]
 
-        save_kwargs = {}
-        if OUTPUT_FORMATS[options.output_format]["quality"]:
-            save_kwargs["quality"] = options.quality
-            save_kwargs["optimize"] = True
-
-        if options.output_format == "PNG":
-            save_kwargs["optimize"] = True
-        if options.output_format == "TIFF":
-            save_kwargs["compression"] = "tiff_deflate"
+        save_kwargs = build_save_kwargs(options, quality_override)
 
         if preserve_frames and len(frames) > 1:
             save_kwargs["save_all"] = True
@@ -228,6 +263,25 @@ def convert_image(source: Path, destination: Path, options: ConversionOptions) -
                 save_kwargs["loop"] = image.info.get("loop", 0)
 
         first.save(destination, save_format, **save_kwargs)
+    return destination
+
+
+def convert_image_optimized(source: Path, destination: Path, options: ConversionOptions) -> Path:
+    convert_image(source, destination, options)
+    if not options.target_size_enabled or not options.target_size_kb:
+        return destination
+    if not OUTPUT_FORMATS[options.output_format]["quality"]:
+        return destination
+
+    target_bytes = options.target_size_kb * 1024
+    if destination.stat().st_size <= target_bytes:
+        return destination
+
+    starting_quality = min(options.quality, 92)
+    for quality in range(starting_quality, 14, -7):
+        convert_image(source, destination, replace(options, quality=quality), quality_override=quality)
+        if destination.stat().st_size <= target_bytes:
+            break
     return destination
 
 
@@ -259,6 +313,9 @@ class ImageConverterApp(TkBase):
         self.metadata_cache: dict[Path, tuple[str, str, str, str]] = {}
         self.logo_image: ImageTk.PhotoImage | None = None
         self.preview_image: ImageTk.PhotoImage | None = None
+        self.preview_images: list[ImageTk.PhotoImage] = []
+        self.cancel_event = threading.Event()
+        self.profiles: dict[str, dict] = self._load_profiles()
 
         self.output_dir = tk.StringVar(value=str(Path.home() / "Pictures"))
         self.output_format = tk.StringVar(value="WEBP")
@@ -275,6 +332,10 @@ class ImageConverterApp(TkBase):
         self.suffix = tk.StringVar(value="")
         self.overwrite = tk.BooleanVar(value=False)
         self.combine_pdf = tk.BooleanVar(value=False)
+        self.target_size_enabled = tk.BooleanVar(value=False)
+        self.target_size_kb = tk.StringVar(value="")
+        self.max_workers = tk.IntVar(value=min(4, max(1, os.cpu_count() or 1)))
+        self.profile_name = tk.StringVar(value="")
         self.progress = tk.DoubleVar(value=0)
 
         self._build_ui()
@@ -330,9 +391,20 @@ class ImageConverterApp(TkBase):
             tk.Label(header, text="C", bg=self.colors["primary"], fg="#ffffff", font=("Segoe UI", 22, "bold"), width=3).grid(
                 row=0, column=0, rowspan=2, padx=(20, 14), pady=14
             )
-        tk.Label(header, text="Converter", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 24, "bold")).grid(
-            row=0, column=1, sticky="sw", pady=(14, 0)
+        brand = tk.Frame(header, bg=self.colors["surface"])
+        brand.grid(row=0, column=1, sticky="sw", pady=(14, 0))
+        tk.Label(brand, text="Converter", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 24, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        tk.Label(
+            brand,
+            text=f"v{APP_VERSION}",
+            bg="#dbeafe",
+            fg=self.colors["primary"],
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=3,
+        ).grid(row=0, column=1, sticky="w", padx=(10, 0))
         tk.Label(
             header,
             text="Convierte imagenes por lote con vista previa, presets, redimensionado y salida optimizada.",
@@ -344,7 +416,8 @@ class ImageConverterApp(TkBase):
         actions.grid(row=0, column=2, rowspan=2, sticky="e", padx=20)
         self._button(actions, "Agregar imagenes", self.add_files, "primary").grid(row=0, column=0, padx=(0, 8))
         self._button(actions, "Agregar carpeta", self.add_folder).grid(row=0, column=1, padx=(0, 8))
-        self._button(actions, "Abrir salida", self.open_output_dir).grid(row=0, column=2)
+        self._button(actions, "Abrir salida", self.open_output_dir).grid(row=0, column=2, padx=(0, 8))
+        self._button(actions, "Actualizar", self.check_for_updates, "ghost").grid(row=0, column=3)
 
         summary = tk.Frame(self, bg=self.colors["bg"])
         summary.grid(row=1, column=0, sticky="ew", padx=18, pady=(14, 10))
@@ -420,9 +493,13 @@ class ImageConverterApp(TkBase):
         preview_frame = self._card(right_panel)
         preview_frame.grid(row=0, column=0, sticky="ew")
         preview_frame.columnconfigure(0, weight=1)
-        tk.Label(preview_frame, text="Vista previa", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(14, 10)
+        preview_head = tk.Frame(preview_frame, bg=self.colors["surface"])
+        preview_head.grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 10))
+        preview_head.columnconfigure(0, weight=1)
+        tk.Label(preview_head, text="Vista previa", bg=self.colors["surface"], fg=self.colors["text"], font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        self._button(preview_head, "Comparar salida", self.preview_output, "ghost").grid(row=0, column=1, sticky="e")
         self.preview_canvas = tk.Canvas(preview_frame, height=240, bg=self.colors["surface_soft"], bd=0, highlightthickness=1, highlightbackground=self.colors["line"])
         self.preview_canvas.grid(row=1, column=0, sticky="ew", padx=16)
         tk.Label(
@@ -536,6 +613,33 @@ class ImageConverterApp(TkBase):
         ttk.Entry(options, textvariable=self.suffix, width=12).grid(row=4, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
         self._check(options, "Sobrescribir", self.overwrite).grid(row=4, column=6, sticky="w", pady=(0, 16))
 
+        self._field_label(options, "Perfil").grid(row=5, column=0, sticky="w", padx=(16, 8), pady=(0, 16))
+        self.profile_combo = ttk.Combobox(
+            options,
+            textvariable=self.profile_name,
+            values=sorted(self.profiles.keys()),
+            state="readonly",
+            width=18,
+        )
+        self.profile_combo.grid(row=5, column=1, sticky="ew", padx=(0, 8), pady=(0, 16))
+        self._button(options, "Cargar", self.load_selected_profile, "ghost").grid(row=5, column=2, sticky="ew", padx=(0, 8), pady=(0, 16))
+        self._button(options, "Guardar", self.save_current_profile, "ghost").grid(row=5, column=3, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._check(options, "Objetivo KB", self.target_size_enabled).grid(row=5, column=4, sticky="w", padx=(0, 8), pady=(0, 16))
+        ttk.Entry(options, textvariable=self.target_size_kb, width=9).grid(row=5, column=5, sticky="ew", padx=(0, 12), pady=(0, 16))
+        self._field_label(options, "Procesos").grid(row=5, column=6, sticky="e", padx=(0, 8), pady=(0, 16))
+        tk.Spinbox(
+            options,
+            from_=1,
+            to=max(1, min(16, os.cpu_count() or 1)),
+            textvariable=self.max_workers,
+            width=5,
+            bg=self.colors["surface"],
+            fg=self.colors["text"],
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 9),
+        ).grid(row=5, column=7, sticky="w", pady=(0, 16))
+
         footer = tk.Frame(self, bg=self.colors["bg"])
         footer.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 16))
         footer.columnconfigure(0, weight=1)
@@ -545,6 +649,9 @@ class ImageConverterApp(TkBase):
         footer.columnconfigure(1, weight=1)
         self.convert_button = self._button(footer, "Convertir", self.start_conversion, "primary")
         self.convert_button.grid(row=0, column=2, sticky="e")
+        self.cancel_button = self._button(footer, "Cancelar", self.cancel_conversion, "ghost")
+        self.cancel_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.cancel_button.configure(state=tk.DISABLED)
 
     def _card(self, parent) -> tk.Frame:
         return tk.Frame(parent, bg=self.colors["surface"], highlightthickness=1, highlightbackground=self.colors["line"])
@@ -745,6 +852,142 @@ class ImageConverterApp(TkBase):
             self.background_hex.set(color[1])
             self.color_swatch.configure(bg=color[1])
 
+    def preview_output(self) -> None:
+        selected = self.file_tree.selection()
+        if not selected:
+            messagebox.showinfo(APP_NAME, "Selecciona una imagen para comparar.")
+            return
+        options = self._read_options()
+        if options is None:
+            return
+
+        path = Path(selected[0])
+        try:
+            with Image.open(path) as image:
+                original = image.convert("RGBA")
+                original.thumbnail((190, 190), Image.Resampling.LANCZOS)
+            output = converted_first_frame(path, options).convert("RGBA")
+            output.thumbnail((190, 190), Image.Resampling.LANCZOS)
+
+            original_photo = ImageTk.PhotoImage(original)
+            output_photo = ImageTk.PhotoImage(output)
+            self.preview_images = [original_photo, output_photo]
+
+            self.preview_canvas.delete("all")
+            width = self.preview_canvas.winfo_width() or 410
+            left_x = width // 4
+            right_x = width * 3 // 4
+            self.preview_canvas.create_text(left_x, 18, text="Original", fill=self.colors["muted"], font=("Segoe UI", 9, "bold"))
+            self.preview_canvas.create_text(right_x, 18, text="Salida", fill=self.colors["primary"], font=("Segoe UI", 9, "bold"))
+            self.preview_canvas.create_image(left_x, 122, image=original_photo, anchor="center")
+            self.preview_canvas.create_image(right_x, 122, image=output_photo, anchor="center")
+
+            original_size = path.stat().st_size
+            estimated_size = estimate_output_size(path, options)
+            self.preview_info.set(
+                f"{path.name} | original {format_size(original_size)} | estimado {format_size(estimated_size)} | {options.output_format}"
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo generar la comparacion:\n{exc}")
+
+    def cancel_conversion(self) -> None:
+        self.cancel_event.set()
+        self.status.set("Cancelando conversion...")
+
+    def _load_profiles(self) -> dict[str, dict]:
+        try:
+            if PROFILES_PATH.exists():
+                return json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {}
+
+    def _save_profiles(self) -> None:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        PROFILES_PATH.write_text(json.dumps(self.profiles, indent=2), encoding="utf-8")
+
+    def _current_profile_data(self) -> dict:
+        return {
+            "output_format": self.output_format.get(),
+            "quality": int(self.quality.get()),
+            "resize_enabled": self.resize_enabled.get(),
+            "resize_width": self.resize_width.get(),
+            "resize_height": self.resize_height.get(),
+            "keep_aspect": self.keep_aspect.get(),
+            "background_hex": self.background_hex.get(),
+            "naming_mode": self.naming_mode.get(),
+            "prefix": self.prefix.get(),
+            "suffix": self.suffix.get(),
+            "overwrite": self.overwrite.get(),
+            "combine_pdf": self.combine_pdf.get(),
+            "target_size_enabled": self.target_size_enabled.get(),
+            "target_size_kb": self.target_size_kb.get(),
+            "max_workers": int(self.max_workers.get()),
+        }
+
+    def save_current_profile(self) -> None:
+        name = simpledialog.askstring(APP_NAME, "Nombre del perfil:")
+        if not name:
+            return
+        self.profiles[name.strip()] = self._current_profile_data()
+        self._save_profiles()
+        self.profile_combo.configure(values=sorted(self.profiles.keys()))
+        self.profile_name.set(name.strip())
+        self.status.set(f"Perfil guardado: {name.strip()}")
+
+    def load_selected_profile(self) -> None:
+        name = self.profile_name.get()
+        data = self.profiles.get(name)
+        if not data:
+            messagebox.showinfo(APP_NAME, "Selecciona un perfil guardado.")
+            return
+        self.output_format.set(data.get("output_format", "WEBP"))
+        self.quality.set(data.get("quality", 85))
+        self.resize_enabled.set(data.get("resize_enabled", False))
+        self.resize_width.set(data.get("resize_width", ""))
+        self.resize_height.set(data.get("resize_height", ""))
+        self.keep_aspect.set(data.get("keep_aspect", True))
+        self.background_hex.set(data.get("background_hex", "#ffffff"))
+        self.color_swatch.configure(bg=self.background_hex.get())
+        self.naming_mode.set(data.get("naming_mode", "Conservar"))
+        self.prefix.set(data.get("prefix", ""))
+        self.suffix.set(data.get("suffix", ""))
+        self.overwrite.set(data.get("overwrite", False))
+        self.combine_pdf.set(data.get("combine_pdf", False))
+        self.target_size_enabled.set(data.get("target_size_enabled", False))
+        self.target_size_kb.set(data.get("target_size_kb", ""))
+        self.max_workers.set(data.get("max_workers", min(4, max(1, os.cpu_count() or 1))))
+        self._refresh_quality_state()
+        self.status.set(f"Perfil cargado: {name}")
+
+    def check_for_updates(self) -> None:
+        self.status.set("Buscando actualizaciones...")
+        thread = threading.Thread(target=self._check_for_updates_worker, daemon=True)
+        thread.start()
+
+    def _check_for_updates_worker(self) -> None:
+        try:
+            request = urllib.request.Request(LATEST_RELEASE_API, headers={"User-Agent": f"Converter/{APP_VERSION}"})
+            with urllib.request.urlopen(request, timeout=10) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            latest = str(payload.get("tag_name", "")).lstrip("v")
+            html_url = payload.get("html_url", LATEST_RELEASE_URL)
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            self.after(0, lambda: messagebox.showwarning(APP_NAME, f"No se pudo revisar actualizaciones:\n{exc}"))
+            self._set_status("No se pudo revisar actualizaciones.")
+            return
+
+        def notify() -> None:
+            if latest and latest != APP_VERSION:
+                if messagebox.askyesno(APP_NAME, f"Hay una nueva version: v{latest}.\n\n¿Abrir pagina de descarga?"):
+                    webbrowser.open(html_url)
+                self.status.set(f"Actualizacion disponible: v{latest}")
+            else:
+                messagebox.showinfo(APP_NAME, "Ya tienes la version mas reciente.")
+                self.status.set("Version actualizada.")
+
+        self.after(0, notify)
+
     def apply_preset(self, _event=None) -> None:
         preset = self.preset_combo.get()
         if preset == "Para web":
@@ -794,8 +1037,11 @@ class ImageConverterApp(TkBase):
             background = ImageColor.getrgb(self.background_hex.get())
             width = int(self.resize_width.get()) if self.resize_width.get().strip() else None
             height = int(self.resize_height.get()) if self.resize_height.get().strip() else None
+            target_size = int(self.target_size_kb.get()) if self.target_size_kb.get().strip() else None
             if width is not None and width <= 0 or height is not None and height <= 0:
                 raise ValueError("El ancho y alto deben ser mayores a cero.")
+            if target_size is not None and target_size <= 0:
+                raise ValueError("El peso objetivo debe ser mayor a cero.")
         except ValueError as exc:
             messagebox.showerror(APP_NAME, f"Opcion invalida:\n{exc}")
             return None
@@ -814,6 +1060,9 @@ class ImageConverterApp(TkBase):
             suffix=self.suffix.get(),
             overwrite=self.overwrite.get(),
             combine_pdf=self.combine_pdf.get(),
+            target_size_enabled=self.target_size_enabled.get(),
+            target_size_kb=target_size,
+            max_workers=max(1, int(self.max_workers.get())),
         )
 
     def start_conversion(self) -> None:
@@ -832,7 +1081,9 @@ class ImageConverterApp(TkBase):
             return
 
         files = list(self.files)
+        self.cancel_event.clear()
         self.convert_button.configure(state=tk.DISABLED)
+        self.cancel_button.configure(state=tk.NORMAL)
         self.progress.set(0)
         thread = threading.Thread(target=self._convert_worker, args=(files, options), daemon=True)
         thread.start()
@@ -841,6 +1092,7 @@ class ImageConverterApp(TkBase):
         converted = 0
         errors: list[str] = []
         outputs: list[Path] = []
+        cancelled = False
 
         try:
             if options.combine_pdf and options.output_format == "PDF":
@@ -851,35 +1103,72 @@ class ImageConverterApp(TkBase):
                         destination = options.output_dir / f"imagenes_convertidas_{counter}.pdf"
                         counter += 1
                 self._set_status("Creando PDF unico...")
-                combine_images_to_pdf(files, destination, options)
-                outputs.append(destination)
-                converted = len(files)
+                if self.cancel_event.is_set():
+                    cancelled = True
+                else:
+                    combine_images_to_pdf(files, destination, options)
+                    outputs.append(destination)
+                    converted = len(files)
                 self._set_progress(100)
             else:
                 total = len(files)
-                for index, source in enumerate(files, start=1):
-                    self._set_status(f"Convirtiendo {index}/{total}: {source.name}")
+                completed = 0
+                reserved_outputs: set[Path] = set()
+                jobs = [
+                    (index, source, build_output_path(source, options.output_dir, options, index, reserved_outputs))
+                    for index, source in enumerate(files, start=1)
+                ]
+
+                def convert_one(index: int, source: Path, destination: Path) -> tuple[bool, Path | None, str | None]:
+                    if self.cancel_event.is_set():
+                        return False, None, None
                     try:
-                        destination = build_output_path(source, options.output_dir, options, index)
-                        convert_image(source, destination, options)
-                        outputs.append(destination)
-                        converted += 1
+                        convert_image_optimized(source, destination, options)
+                        return True, destination, None
                     except (OSError, UnidentifiedImageError, ValueError) as exc:
-                        errors.append(f"{source.name}: {exc}")
-                    self._set_progress(index / total * 100)
+                        return False, None, f"{source.name}: {exc}"
+
+                max_workers = min(options.max_workers, total)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {
+                        executor.submit(convert_one, index, source, destination): (index, source)
+                        for index, source, destination in jobs
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        index, source = future_map[future]
+                        if self.cancel_event.is_set():
+                            cancelled = True
+                        self._set_status(f"Procesando {min(completed + 1, total)}/{total}: {source.name}")
+                        ok, output, error = future.result()
+                        if ok and output is not None:
+                            outputs.append(output)
+                            converted += 1
+                        if error:
+                            errors.append(error)
+                        completed += 1
+                        self._set_progress(completed / total * 100)
+                        if self.cancel_event.is_set():
+                            for pending in future_map:
+                                pending.cancel()
+                            cancelled = True
+                            break
         finally:
             self.after(0, lambda: self.convert_button.configure(state=tk.NORMAL))
+            self.after(0, lambda: self.cancel_button.configure(state=tk.DISABLED))
 
-        self.after(0, lambda: self._finish_conversion(converted, errors, outputs))
+        self.after(0, lambda: self._finish_conversion(converted, errors, outputs, cancelled))
 
-    def _finish_conversion(self, converted: int, errors: list[str], outputs: list[Path]) -> None:
+    def _finish_conversion(self, converted: int, errors: list[str], outputs: list[Path], cancelled: bool = False) -> None:
         for output in outputs:
             self.history_list.insert(tk.END, f"OK  {output.name} -> {output.parent}")
         for error in errors[:25]:
             self.history_list.insert(tk.END, f"ERR {error}")
         self.history_list.yview_moveto(1)
 
-        if errors:
+        if cancelled:
+            self.status.set(f"Cancelado. Convertidas: {converted}. Errores: {len(errors)}.")
+            messagebox.showinfo(APP_NAME, f"Conversion cancelada.\nImagenes convertidas: {converted}")
+        elif errors:
             self.status.set(f"Convertidas: {converted}. Errores: {len(errors)}.")
             messagebox.showwarning(APP_NAME, "Algunas imagenes no se pudieron convertir:\n\n" + "\n".join(errors[:10]))
         else:
