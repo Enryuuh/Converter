@@ -20,13 +20,17 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Comparacion con fondo cuadriculado para transparencias y zoom rapido.
 - Peso real mostrado en la cola al terminar cada archivo.
 - Estimacion de peso y ahorro total para todo el lote antes de convertir.
+- Analisis de lote por formato con ahorro estimado.
+- Barra de progreso total y barra del archivo actual.
 - Pausar/reanudar conversiones, cancelar y reintentar solo archivos con error.
 - Drag and drop de archivos y carpetas, incluyendo subcarpetas.
 - Filtros por estado, formato, peso original, busqueda por nombre/ruta y orden por nombre, peso, formato, estado o tamano.
+- Reordenar la cola arrastrando filas o con botones Subir/Bajar.
 - Deteccion de duplicados por contenido al agregar archivos o carpetas.
-- Vista previa de rutas de salida antes de convertir.
+- Vista previa de rutas de salida en tabla antes de convertir.
 - Guardado y restauracion automatica de la sesion de cola.
 - Avisos visuales en detalle para RAW, transparencia, animados, archivos pesados o problemas.
+- Panel dedicado de errores con reintento y copiado de detalles.
 - Reportes TXT, CSV y HTML al terminar cada conversion.
 - ZIP final opcional con todos los archivos generados.
 - Presets para web, Instagram, WhatsApp, impresion, producto, SVG, fondo transparente, ahorro maximo, sin perdida, ICO y PDF.
@@ -59,20 +63,26 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Perfiles personalizados guardados en el equipo.
 - Importacion y exportacion de perfiles en JSON.
 - Exportacion de un solo perfil, perfiles default integrados y restauracion rapida de ajustes.
+- Archivos `.converterprofile` para importar perfiles abriendolos con Converter.
 - Importacion y exportacion de ajustes completos en JSON.
 - Ajustes guardados automaticamente en `%APPDATA%\Converter\settings.json`.
 - Logs persistentes en `%APPDATA%\Converter\converter.log`.
+- Cache persistente de metadatos para acelerar carpetas grandes.
 - Renombrado por lote: conservar, numerar o prefijo/sufijo.
 - Opcion para sobrescribir o crear nombres nuevos automaticamente.
 - Boton para abrir la carpeta de salida.
 - Interfaz moderna con logo propio y nombre `Converter`.
 - Modo nocturno/claro con cambio desde la cabecera.
+- Modo compacto/completo y modo bajo consumo.
 - Tooltips y guia integrada para explicar cada opcion de salida.
 - Menu contextual opcional de Windows para abrir archivos o carpetas desde clic derecho.
 - Menu contextual opcional tambien desde el instalador.
+- Instalador con opcion portable y asociacion de `.converterprofile`.
+- Auto-update: revisa GitHub Releases y descarga instalador, EXE o ZIP portable desde la app.
+- Panel de integridad con ruta y SHA256 del binario actual.
 - PDF con tamano de pagina Original, A4 o Carta y orientacion automatica.
 - Modo CLI: convierte desde terminal con `Converter.exe archivo.png --to webp`.
-- Modo portable creando `portable.flag` junto al ejecutable.
+- ZIP portable oficial en Releases y modo portable creando `portable.flag` junto al ejecutable.
 - Campos contextuales: las opciones que no aplican se desactivan automaticamente.
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
@@ -111,6 +121,16 @@ El instalador queda en:
 dist\ConverterSetup.exe
 ```
 
+## Paquete portable
+
+El release automatico tambien publica:
+
+```text
+dist\ConverterPortable.zip
+```
+
+Incluye `Converter.exe` y `portable.flag`, por lo que guarda datos en la carpeta `data` junto al ejecutable.
+
 ## Firma digital opcional
 
 El proyecto incluye `scripts\sign_windows.ps1`. Si defines estos secrets en GitHub, el workflow firma los binarios automaticamente:
@@ -122,14 +142,14 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 
 ## Releases automaticos
 
-El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe` y publica ambos como assets cuando se sube un tag:
+El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe`, `ConverterPortable.zip` y publica todos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.8
-git push origin v1.3.8
+git tag v1.3.9
+git push origin v1.3.9
 ```
 
-Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe` y `ConverterSetup.exe`.
+Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe`, `ConverterSetup.exe` y `ConverterPortable.zip`.
 
 ## Ejecutar sin compilar
 

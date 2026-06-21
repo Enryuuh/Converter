@@ -10,6 +10,7 @@ import app as converter_app
 from app import (
     ConversionOptions,
     build_output_path,
+    build_output_plan_rows,
     combine_images_to_pdf,
     create_outputs_zip,
     convert_image_optimized,
@@ -22,6 +23,7 @@ from app import (
     flatten_alpha,
     image_to_svg_bytes,
     is_raw_image,
+    is_profile_file,
     is_supported_image,
     parse_output_formats,
     parse_version,
@@ -30,6 +32,7 @@ from app import (
     render_output_stem,
     run_cli,
     resize_image,
+    select_release_asset,
     write_conversion_reports,
     ImageConverterApp,
     apply_square_canvas,
@@ -135,6 +138,19 @@ class ConversionTests(unittest.TestCase):
 
             self.assertEqual(output, output_dir / "nested" / "photo.webp")
 
+    def test_build_output_plan_rows_includes_pdf_and_regular_outputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp) / "out"
+            source = Path(tmp) / "photo.png"
+            source.touch()
+            options = make_options(output_dir=output_dir, output_formats=("PDF", "WEBP"), combine_pdf=True)
+
+            rows = build_output_plan_rows([source], options)
+
+            self.assertEqual([row.output_format for row in rows], ["PDF", "WEBP"])
+            self.assertEqual(rows[0].note, "PDF unico del lote")
+            self.assertEqual(rows[1].destination.name, "photo.webp")
+
     def test_render_output_stem_uses_template_tokens(self):
         source = Path("folder/photo.png")
         options = make_options(output_format="JPG", naming_mode="Plantilla", naming_template="{folder}_{name}_{index}_{format}")
@@ -150,6 +166,24 @@ class ConversionTests(unittest.TestCase):
         self.assertEqual(parse_output_formats("WEBP", "png, jpg, WEBP"), ("WEBP", "PNG", "JPG"))
         with self.assertRaises(ValueError):
             parse_output_formats("WEBP", "not-real")
+
+    def test_select_release_asset_prefers_requested_name(self):
+        payload = {
+            "assets": [
+                {"name": "Converter.exe", "browser_download_url": "https://example.com/exe"},
+                {"name": "ConverterSetup.exe", "browser_download_url": "https://example.com/setup"},
+            ]
+        }
+
+        asset = select_release_asset(payload, ("ConverterSetup.exe",))
+
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["browser_download_url"], "https://example.com/setup")
+
+    def test_profile_file_detection(self):
+        self.assertTrue(is_profile_file(Path("web.converterprofile")))
+        self.assertTrue(is_profile_file(Path("web.converter-profile.json")))
+        self.assertFalse(is_profile_file(Path("photo.png")))
 
     def test_supported_image_detects_unknown_extension_by_content(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,7 +4,7 @@
 #define MyAppURL "https://github.com/Enryuuh/Converter"
 #define MyAppVersion GetEnv("APP_VERSION")
 #if MyAppVersion == ""
-#define MyAppVersion "1.3.8"
+#define MyAppVersion "1.3.9"
 #endif
 
 [Setup]
@@ -35,12 +35,15 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "contextmenu"; Description: "Agregar clic derecho > Convertir con Converter"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "portableflag"; Description: "Activar modo portable en esta instalacion"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "profileassoc"; Description: "Asociar archivos .converterprofile"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\Abrir carpeta de imagenes"; Filename: "{userdocs}\Pictures"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
@@ -51,6 +54,11 @@ Root: HKCU; Subkey: "Software\Classes\*\shell\Converter\command"; ValueType: str
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\Converter"; ValueType: string; ValueName: ""; ValueData: "Convertir con {#MyAppName}"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\Converter"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKCU; Subkey: "Software\Classes\Directory\shell\Converter\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKCU; Subkey: "Software\Classes\.converterprofile"; ValueType: string; ValueName: ""; ValueData: "Converter.Profile"; Flags: uninsdeletekey; Tasks: profileassoc
+Root: HKCU; Subkey: "Software\Classes\Converter.Profile"; ValueType: string; ValueName: ""; ValueData: "Perfil de Converter"; Flags: uninsdeletekey; Tasks: profileassoc
+Root: HKCU; Subkey: "Software\Classes\Converter.Profile\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletekey; Tasks: profileassoc
+Root: HKCU; Subkey: "Software\Classes\Converter.Profile\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""; Flags: uninsdeletekey; Tasks: profileassoc
 
 [Run]
+Filename: "{cmd}"; Parameters: "/C type nul > ""{app}\portable.flag"""; Flags: runhidden; Tasks: portableflag
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
