@@ -209,6 +209,14 @@ class ConversionTests(unittest.TestCase):
         self.assertTrue(is_raw_image(source))
         self.assertTrue(is_supported_image(source))
 
+    def test_writable_directory_probe_cleans_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "data"
+
+            self.assertTrue(converter_app._is_writable_directory(target))
+            self.assertTrue(target.is_dir())
+            self.assertFalse(any(path.name.startswith(".write-test-") for path in target.iterdir()))
+
     def test_describe_raw_image_uses_rawpy_sizes(self):
         class FakeRaw:
             sizes = SimpleNamespace(

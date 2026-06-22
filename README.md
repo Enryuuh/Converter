@@ -16,6 +16,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Miniaturas en la cola para identificar fotos rapido.
 - Peso estimado automatico de la imagen seleccionada antes de convertir.
 - Peso estimado por archivo directamente en la cola.
+- Cache compartido de estimaciones para evitar recalcular el mismo formato varias veces.
 - Comparacion antes/despues con peso estimado de salida.
 - Comparacion con fondo cuadriculado para transparencias y zoom rapido.
 - Peso real mostrado en la cola al terminar cada archivo.
@@ -56,6 +57,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Guardar en subcarpeta automatica `Converter_Output`.
 - Compresion por peso objetivo en KB para formatos con calidad configurable.
 - Aviso cuando el peso objetivo no se puede alcanzar sin cambiar dimensiones/formato.
+- Los avisos de peso objetivo no marcan como error los archivos generados correctamente.
 - Fondo configurable para formatos sin transparencia como JPG, BMP y PDF.
 - Opcion para quitar o conservar metadatos EXIF cuando el formato lo soporta.
 - Apertura automatica de la carpeta de salida al terminar.
@@ -78,6 +80,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Menu contextual opcional de Windows para abrir archivos o carpetas desde clic derecho.
 - Menu contextual opcional tambien desde el instalador.
 - Instalador con opcion portable y asociacion de `.converterprofile`.
+- El modo portable cae a `%APPDATA%\Converter` si la carpeta instalada no permite escritura.
 - Auto-update: revisa GitHub Releases y descarga instalador, EXE o ZIP portable desde la app.
 - Panel de integridad con ruta y SHA256 del binario actual.
 - PDF con tamano de pagina Original, A4 o Carta y orientacion automatica.
@@ -87,6 +90,7 @@ La tabla muestra el tipo real detectado, tamano, modo de color y ruta de cada ar
 - Cache de metadatos y conversion optimizada para no procesar frames innecesarios.
 - Verificacion de actualizaciones contra GitHub Releases.
 - Carga de metadatos en segundo plano para no congelar la interfaz con carpetas grandes.
+- Escaneos antiguos se descartan si limpias/restauras la cola mientras siguen trabajando.
 - Build aislado en `.venv-build` para evitar empaquetar dependencias globales innecesarias.
 - Compresion por peso objetivo optimizada con busqueda binaria de calidad.
 
@@ -121,6 +125,8 @@ El instalador queda en:
 dist\ConverterSetup.exe
 ```
 
+Este paso actualiza `dist\checksums-sha256.txt` para el ejecutable y el instalador locales.
+
 ## Paquete portable
 
 El release automatico tambien publica:
@@ -145,8 +151,8 @@ Si esos secrets no existen, el workflow publica el release sin firma. En ese cas
 El workflow `.github/workflows/release.yml` construye `Converter.exe`, `ConverterSetup.exe`, `ConverterPortable.zip` y publica todos como assets cuando se sube un tag:
 
 ```powershell
-git tag v1.3.9
-git push origin v1.3.9
+git tag v1.3.10
+git push origin v1.3.10
 ```
 
 Cada release incluye `checksums-sha256.txt` para verificar la integridad de `Converter.exe`, `ConverterSetup.exe` y `ConverterPortable.zip`.

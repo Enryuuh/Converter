@@ -11,6 +11,7 @@ dist/*.exe
 dist/*.txt
 dist/*.zip
 dist/portable/
+dist/portable-verify/
 
 # Local environment files.
 .env
